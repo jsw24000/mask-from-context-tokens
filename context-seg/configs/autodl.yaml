@@ -1,0 +1,60 @@
+model:
+  num_queries: 16
+  token_layer: -1
+  hidden_dim: 256
+  num_attention_heads: 8
+  num_predictor_layers: 3
+  mask_size: [392, 392]
+  patch_size: 14
+
+data:
+  root: /root/autodl-tmp/mask-from-context-tokens/data_davis
+  mask_root: /root/autodl-tmp/mask-from-context-tokens/data_sam_masks
+  clip_length: 8
+  num_scale_frames: 2
+  clip_stride: 1
+  limit_scenes:
+  limit_clips:
+  overfit_limit_clips: 4
+
+lingbot:
+  checkpoint: /root/autodl-tmp/mask-from-context-tokens/paths/lingbot-map.pt
+  freeze_backbone: true
+  use_no_grad: true
+  enable_3d_rope: true
+  max_frame_num: 1024
+  use_sdpa: false
+  keyframe_interval: 1
+  kv_cache_camera_only: true
+  kv_cache_sliding_window: 64
+  kv_cache_scale_frames: 8
+  kv_cache_cross_frame_special: true
+  kv_cache_include_scale_frames: true
+
+sam:
+  checkpoint: /root/autodl-tmp/mask-from-context-tokens/paths/sam_vit_h_4b8939.pth
+  model_type: vit_h
+
+matcher:
+  cost_bce: 1.0
+  cost_dice: 1.0
+  cost_size: 128
+
+loss:
+  bce_weight: 1.0
+  dice_weight: 1.0
+
+train:
+  batch_size: 1
+  num_workers: 0
+  device: cuda
+  lr: 0.0001
+  weight_decay: 0.0001
+  max_steps: 100
+  overfit_steps: 20
+  grad_clip: 1.0
+  max_target_masks: 32
+  output_dir: /root/autodl-tmp/mask-from-context-tokens/context-seg/runs/autodl_overfit
+  vis_interval: 5
+  save_interval: 20
+

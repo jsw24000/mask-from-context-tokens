@@ -34,3 +34,10 @@ paths/*.safetensors
 context-seg/runs/
 wandb/
 runs/
+
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+*.tgz

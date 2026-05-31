@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import yaml
 from PIL import Image
 from tqdm.auto import tqdm
 
@@ -17,10 +18,11 @@ from context_seg.dataset import IMAGE_EXTS
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate offline SAM pseudo masks for scene/images datasets")
+    parser.add_argument("--config", type=str, default=None, help="Optional context-seg yaml config")
     parser.add_argument("--image-root", type=str, required=True, help="Dataset root with <scene>/images/*.png")
     parser.add_argument("--output-root", type=str, required=True, help="Output root for <scene>/<frame>.npz masks")
-    parser.add_argument("--sam-checkpoint", type=str, required=True)
-    parser.add_argument("--model-type", type=str, default="vit_b", choices=["vit_b", "vit_l", "vit_h"])
+    parser.add_argument("--sam-checkpoint", type=str, default=None)
+    parser.add_argument("--model-type", type=str, default=None, choices=["vit_b", "vit_l", "vit_h"])
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--points-per-side", type=int, default=32)
     parser.add_argument("--pred-iou-thresh", type=float, default=0.88)
@@ -33,6 +35,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    apply_config_defaults(args)
+    if not args.sam_checkpoint:
+        raise SystemExit("Missing --sam-checkpoint or sam.checkpoint in config")
+    if not args.model_type:
+        args.model_type = "vit_b"
     try:
         from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
     except ImportError as exc:
@@ -79,6 +86,18 @@ def main() -> None:
     print(f"Saved SAM pseudo masks to {output_root}")
 
 
+def apply_config_defaults(args: argparse.Namespace) -> None:
+    if args.config is None:
+        return
+    with open(args.config, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    sam_cfg = cfg.get("sam", {}) if isinstance(cfg, dict) else {}
+    if args.sam_checkpoint is None:
+        args.sam_checkpoint = sam_cfg.get("checkpoint")
+    if args.model_type is None:
+        args.model_type = sam_cfg.get("model_type")
+
+
 def collect_scene_images(root: Path) -> list[tuple[str, Path]]:
     results: list[tuple[str, Path]] = []
     for scene_dir in sorted(p for p in root.iterdir() if p.is_dir()):
@@ -113,4 +132,3 @@ def pack_annotations(
 
 if __name__ == "__main__":
     main()
-
