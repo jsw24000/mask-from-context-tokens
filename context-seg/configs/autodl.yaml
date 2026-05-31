@@ -1,17 +1,20 @@
 model:
-  num_queries: 16
+  # 32GB 显存可以先用 32 个 object query；若显存紧张再降到 16。
+  num_queries: 32
   token_layer: -1
   hidden_dim: 256
   num_attention_heads: 8
   num_predictor_layers: 3
-  mask_size: [392, 392]
+  # 518 与 LingBot/DINOv2 常见输入尺寸一致，patch_size=14 时得到 37x37 patch grid。
+  mask_size: [518, 518]
   patch_size: 14
 
 data:
   root: /root/autodl-tmp/mask-from-context-tokens/data_davis
   mask_root: /root/autodl-tmp/mask-from-context-tokens/data_sam_masks
-  clip_length: 8
-  num_scale_frames: 2
+  # 前 4 帧作为 scale frames，后续 8 帧逐帧 streaming 训练。
+  clip_length: 12
+  num_scale_frames: 4
   clip_stride: 1
   limit_scenes:
   limit_clips:
@@ -45,16 +48,18 @@ loss:
   dice_weight: 1.0
 
 train:
+  # LingBot backbone 很重，第一版保持 batch_size=1；32GB 显存主要用于更长 clip/更高分辨率。
   batch_size: 1
-  num_workers: 0
+  # 12 vCPU 上先用 4 个 worker；如果 CPU/磁盘跟得上，可试 6 或 8。
+  num_workers: 4
   device: cuda
   lr: 0.0001
   weight_decay: 0.0001
-  max_steps: 100
-  overfit_steps: 20
+  max_steps: 1000
+  overfit_steps: 100
   grad_clip: 1.0
-  max_target_masks: 32
+  # 每张图最多取 48 个 SAM masks 参与匹配；想要更完整监督可加到 64。
+  max_target_masks: 48
   output_dir: /root/autodl-tmp/mask-from-context-tokens/context-seg/runs/autodl_overfit
-  vis_interval: 5
-  save_interval: 20
-
+  vis_interval: 20
+  save_interval: 100
