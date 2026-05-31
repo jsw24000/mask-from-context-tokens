@@ -23,6 +23,7 @@ weights/
 data/
 data_davis/
 data_sam_masks/
+data_sam_masks*/
 
 # Local checkpoints and model weights
 paths/*.pt

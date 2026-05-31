@@ -26,7 +26,8 @@ lingbot:
   use_no_grad: true
   enable_3d_rope: true
   max_frame_num: 1024
-  use_sdpa: false
+  # AutoDL 镜像通常没有 flashinfer；先用 PyTorch SDPA，跑通后再考虑 flashinfer 加速。
+  use_sdpa: true
   keyframe_interval: 1
   kv_cache_camera_only: true
   kv_cache_sliding_window: 64
