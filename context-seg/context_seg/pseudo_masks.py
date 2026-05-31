@@ -26,7 +26,7 @@ class PseudoMaskProvider:
         suffix: str = ".npz",
         device: Optional[torch.device | str] = None,
     ) -> None:
-        # 中文导读：root 下每张图对应一个 `.npz`，文件名由 image_id 决定。
+        # root 下每张图对应一个 `.npz`，文件名由 image_id 决定。
         # 例如 image_id="000001" 时默认读取 root/000001.npz。
         self.root = Path(root)
         self.mask_key = mask_key
@@ -41,14 +41,14 @@ class PseudoMaskProvider:
         if not path.exists():
             raise FileNotFoundError(f"Pseudo mask cache not found: {path}")
 
-        # 中文导读：第一版只约定离线 SAM 伪标签的最小字段。
+        # 第一版只约定离线 SAM 伪标签的最小字段。
         # 后续如果改成 COCO RLE/json，只需要替换这个 provider，不影响训练模块。
         data = np.load(path)
         if self.mask_key not in data:
             raise KeyError(f"Missing mask key {self.mask_key!r} in {path}")
 
         masks = torch.as_tensor(data[self.mask_key]).float()
-        # 中文导读：boxes/scores/areas 不是当前 loss 必需，但保留下来方便后续做过滤、
+        # boxes/scores/areas 不是当前 loss 必需，但保留下来方便后续做过滤、
         # matching 或按 SAM 置信度加权。
         boxes = _optional_tensor(data, "boxes", "bboxes")
         scores = _optional_tensor(data, "scores")

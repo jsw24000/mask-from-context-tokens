@@ -86,12 +86,12 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
         self.enable_3d_rope = enable_3d_rope
 
         # Build aggregator (subclass-specific)
-        # 中文导读：aggregator 是主干网络，负责把图像 patch 和特殊 token
+        # aggregator 是主干网络，负责把图像 patch 和特殊 token
         # 融合成时空上下文特征；stream/windowed 子类会构建不同实现。
         self.aggregator = self._build_aggregator()
 
         # Build prediction heads (subclass-specific)
-        # 中文导读：head 只负责把 aggregator token 解码成具体任务输出：
+        # head 只负责把 aggregator token 解码成具体任务输出：
         # 相机位姿、深度、世界点或相机局部点。
         self.camera_head = self._build_camera_head() if enable_camera else None
         self.point_head = self._build_point_head() if enable_point else None

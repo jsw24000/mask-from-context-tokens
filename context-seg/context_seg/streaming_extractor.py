@@ -43,7 +43,7 @@ class StreamingLingbotTokenExtractor(nn.Module):
             )
 
         if freeze_backbone:
-            # 中文导读：streaming 版本仍默认冻结 LingBot，只训练后续 mask 模块。
+            # streaming 版本仍默认冻结 LingBot，只训练后续 mask 模块。
             self.model.eval()
             for param in self.model.parameters():
                 param.requires_grad_(False)

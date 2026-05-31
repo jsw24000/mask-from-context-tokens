@@ -22,10 +22,10 @@ class InstanceQueryPredictor(nn.Module):
 
         self.num_queries = num_queries
         self.hidden_dim = hidden_dim
-        # 中文导读：object queries 是可学习的“槽位”。训练后理想情况下，
+        # object queries 是可学习的“槽位”。训练后理想情况下，
         # 不同 query 会各自聚合到不同实例或背景/空目标的信息。
         self.query_embed = nn.Parameter(torch.randn(num_queries, hidden_dim) * 0.02)
-        # 中文导读：LingBot token 维度通常较大，先投影到分割头内部 hidden_dim。
+        # LingBot token 维度通常较大，先投影到分割头内部 hidden_dim。
         self.context_proj = nn.Linear(context_dim, hidden_dim) if context_dim != hidden_dim else nn.Identity()
         self.layers = nn.ModuleList(
             [_QueryCrossAttentionBlock(hidden_dim, num_heads, dropout) for _ in range(num_layers)]
@@ -43,7 +43,7 @@ class InstanceQueryPredictor(nn.Module):
         """
         original_ndim = context_tokens.ndim
         if original_ndim == 4:
-            # 中文导读：把 [B, S] 合并成 batch 维，表示每个视角独立做 2D 实例分割。
+            # 把 [B, S] 合并成 batch 维，表示每个视角独立做 2D 实例分割。
             # 如果后续要做跨视角一致性，可以在这里改成保留 S 维的时序建模。
             batch, frames, tokens, channels = context_tokens.shape
             context_tokens = context_tokens.reshape(batch * frames, tokens, channels)
@@ -54,7 +54,7 @@ class InstanceQueryPredictor(nn.Module):
             raise ValueError(f"Expected [B,N,C] or [B,S,N,C], got {tuple(context_tokens.shape)}")
 
         memory = self.context_proj(context_tokens)
-        # 中文导读：同一组 query 参数会复制到 batch 中的每个视角，再通过 cross-attention
+        # 同一组 query 参数会复制到 batch 中的每个视角，再通过 cross-attention
         # 从当前视角的 context tokens 中读取实例信息。
         queries = self.query_embed.unsqueeze(0).expand(memory.shape[0], -1, -1)
         for layer in self.layers:
@@ -83,7 +83,7 @@ class _QueryCrossAttentionBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, queries: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
-        # 中文导读：先让 query 之间交换信息，再让 query attend 到 LingBot context tokens，
+        # 先让 query 之间交换信息，再让 query attend 到 LingBot context tokens，
         # 最后用 FFN 做非线性更新；这是 DETR/Mask2Former 类方法常见的结构骨架。
         q = self.norm_q1(queries)
         queries = queries + self.dropout(self.self_attn(q, q, q, need_weights=False)[0])
@@ -94,4 +94,4 @@ class _QueryCrossAttentionBlock(nn.Module):
         return queries
 
 
-ObjectQueryPredictor = InstanceQueryPredictor
+ObjectQueryPredictor = InstanceQueryPredictor 
