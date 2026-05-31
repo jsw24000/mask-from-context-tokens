@@ -23,7 +23,8 @@ lingbot:
   use_no_grad: true
   enable_3d_rope: true
   max_frame_num: 1024
-  use_sdpa: false
+  # 默认使用 PyTorch SDPA，避免没有安装 flashinfer 时无法启动 LingBot。
+  use_sdpa: true
   keyframe_interval: 1
   kv_cache_camera_only: true
   kv_cache_sliding_window: 64
@@ -57,4 +58,3 @@ train:
   output_dir: context-seg/runs/overfit
   vis_interval: 5
   save_interval: 20
-

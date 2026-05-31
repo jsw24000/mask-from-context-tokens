@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -36,7 +36,7 @@ class VideoFrameDataset(Dataset):
         clip_length: int = 16,
         image_size: int | Sequence[int] = 518,
         clip_stride: int = 1,
-        limit_scenes: int | None = None,
+        limit_scenes: int | str | Sequence[str] | None = None,
         limit_clips: int | None = None,
     ) -> None:
         self.root = Path(root)
@@ -52,7 +52,7 @@ class VideoFrameDataset(Dataset):
 
         scenes = _find_scenes(self.root)
         if limit_scenes is not None:
-            scenes = scenes[: int(limit_scenes)]
+            scenes = _limit_scenes(scenes, limit_scenes)
 
         samples: list[tuple[str, list[Path]]] = []
         for scene, image_paths in scenes:
@@ -128,6 +128,20 @@ def _list_images(root: Path) -> list[Path]:
     return sorted(p for p in root.iterdir() if p.is_file() and p.suffix in IMAGE_EXTS)
 
 
+def _limit_scenes(
+    scenes: list[tuple[str, list[Path]]],
+    limit_scenes: int | str | Sequence[str],
+) -> list[tuple[str, list[Path]]]:
+    # 支持 limit_scenes: 4 取前 N 个，也支持 ["bear"] 这种指定场景名。
+    if isinstance(limit_scenes, int):
+        return scenes[:limit_scenes]
+    if isinstance(limit_scenes, str):
+        names = {limit_scenes}
+    else:
+        names = {str(name) for name in limit_scenes}
+    return [(scene, paths) for scene, paths in scenes if scene in names]
+
+
 def _load_image(path: Path, image_size: tuple[int, int]) -> torch.Tensor:
     img = Image.open(path).convert("RGB").resize((image_size[1], image_size[0]), Image.Resampling.BICUBIC)
     arr = np.asarray(img, dtype=np.float32) / 255.0
@@ -150,4 +164,3 @@ def _to_hw(image_size: int | Sequence[int]) -> tuple[int, int]:
     if len(values) != 2:
         raise ValueError(f"image_size must be int or (H, W), got {image_size}")
     return values
-
