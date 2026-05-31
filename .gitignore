@@ -1,0 +1,36 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.so
+.eggs/
+demo_render/
+CLAUDE.md
+.claude/
+.agents/
+skyseg.onnx
+.claude-remote
+weights/
+.DS_Store
+**/.DS_Store
+
+# Python/test caches
+.pytest_cache/
+
+# Local datasets and generated pseudo labels
+data/
+data_davis/
+data_sam_masks/
+
+# Local checkpoints and model weights
+paths/*.pt
+paths/*.pth
+paths/*.ckpt
+paths/*.safetensors
+
+# Training outputs
+context-seg/runs/
+wandb/
+runs/

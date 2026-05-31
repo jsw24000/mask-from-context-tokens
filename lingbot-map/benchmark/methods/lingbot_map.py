@@ -244,6 +244,8 @@ class LingbotMapMethod(BaseMethod):
 
     def process_scene(self, gt_artifact) -> Dict[str, Any]:
         """Process a scene with LingbotMap inference."""
+        # 中文导读：benchmark 不直接调用 demo.py，而是通过这个适配器完成
+        # 数据读取 -> 模型推理 -> 输出格式转换，最后交给 BSSSaver 保存。
         loader = BSSLoader(gt_artifact, resize_context=self.resize_context)
         input_rgb_list = loader.load_rgb_list()
         self.logger.info(f"Image size for processing: {loader.get_processing_dimensions()} (HxW)")

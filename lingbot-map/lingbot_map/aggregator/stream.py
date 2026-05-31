@@ -150,6 +150,8 @@ class AggregatorStream(AggregatorBase):
 
     def _setup_special_tokens(self):
         """Setup camera, register, and scale tokens for causal mode."""
+        # 中文导读：每帧 token = camera token + register token + scale token + image patches。
+        # camera token 给相机 head 使用；scale token 帮助前几帧建立尺度。
         # Camera token
         self.camera_token = nn.Parameter(
             torch.randn(1, 2, 1, self.embed_dim)
@@ -178,6 +180,8 @@ class AggregatorStream(AggregatorBase):
 
     def _init_kv_cache(self):
         """Initialize KV cache for streaming inference."""
+        # 中文导读：FlashInfer 使用分页 KV cache；SDPA fallback 使用普通 dict。
+        # 两者目的相同：缓存历史帧的 key/value，避免每来一帧都重算过去。
         self.kv_cache_manager = None  # FlashInfer (lazy-initialized)
         self.kv_cache = {}  # Dict-based cache for SDPA
         self.total_frames_processed = 0
@@ -430,6 +434,9 @@ class AggregatorStream(AggregatorBase):
     ):
         """
         Causal attention for streaming inference using FlashInfer KV cache.
+
+        中文导读：这里是真正的流式时序注意力。输入 token 会按帧组织，
+        当前帧只能 attend 到缓存中的过去帧和自身，从而满足在线推理约束。
 
         Args:
             tokens: Input tokens [B*S_local, P, C]

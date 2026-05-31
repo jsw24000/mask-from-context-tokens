@@ -86,9 +86,13 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
         self.enable_3d_rope = enable_3d_rope
 
         # Build aggregator (subclass-specific)
+        # 中文导读：aggregator 是主干网络，负责把图像 patch 和特殊 token
+        # 融合成时空上下文特征；stream/windowed 子类会构建不同实现。
         self.aggregator = self._build_aggregator()
 
         # Build prediction heads (subclass-specific)
+        # 中文导读：head 只负责把 aggregator token 解码成具体任务输出：
+        # 相机位姿、深度、世界点或相机局部点。
         self.camera_head = self._build_camera_head() if enable_camera else None
         self.point_head = self._build_point_head() if enable_point else None
         self.local_point_head = self._build_local_point_head() if enable_local_point else None
@@ -315,6 +319,7 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
         """
         images, query_points = self._normalize_input(images, query_points)
 
+        # 1. 主干提特征：输出多个层级的 token，供不同 head 使用。
         aggregated_tokens_list, patch_start_idx = self._aggregate_features(
             images,
             num_frame_for_scale=num_frame_for_scale,
@@ -324,6 +329,7 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
 
         predictions = {}
 
+        # 2. 相机 head 预测 pose encoding。
         predictions.update(self._predict_camera(
             aggregated_tokens_list,
             mask=ordered_video,
@@ -334,11 +340,13 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
             gather_outputs=gather_outputs,
         ))
 
+        # 3. DPT head 预测 dense depth。
         predictions.update(self._predict_depth(
             aggregated_tokens_list, images, patch_start_idx,
             gather_outputs=gather_outputs,
         ))
 
+        # 4. 可选：预测世界坐标点云或相机局部坐标点。
         predictions.update(self._predict_points(
             aggregated_tokens_list, images, patch_start_idx,
             gather_outputs=gather_outputs,

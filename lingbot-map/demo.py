@@ -62,6 +62,8 @@ def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png
         (images, paths, resolved_image_folder): preprocessed tensor, file paths,
         and the folder containing the source images (for sky mask caching etc.).
     """
+    # 中文导读：demo 支持两种输入。视频会先按 fps 抽帧到临时目录；
+    # 图片目录则直接收集文件路径。两条路径最终都会进入同一个预处理函数。
     if video_path is not None:
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         out_dir = os.path.join(os.path.dirname(video_path), f"{video_name}_frames")
@@ -130,6 +132,8 @@ def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png
 
 def load_model(args, device):
     """Load GCTStream model from checkpoint."""
+    # 中文导读：streaming 适合常规在线逐帧推理；windowed 会把长视频拆成窗口，
+    # 用 overlap 连接窗口结果，主要用于超长序列。
     if getattr(args, "mode", "streaming") == "windowed":
         from lingbot_map.models.gct_stream_window import GCTStream
     else:
@@ -277,6 +281,8 @@ def _squeeze_single_batch(key, value):
 
 def postprocess(predictions, images):
     """Convert pose encoding to extrinsics (c2w) and move to CPU."""
+    # 中文导读：模型头部输出的是紧凑 pose encoding；可视化需要真实相机矩阵，
+    # 所以这里统一解码成外参/内参，并把结果搬到 CPU 侧。
     extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
 
     # Convert w2c to c2w
@@ -544,6 +550,8 @@ def main():
 
     with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
         if args.mode == "streaming":
+            # 中文导读：流式模式先建立尺度帧上下文，然后一帧一帧追加到 KV cache。
+            # keyframe_interval > 1 时，非关键帧会参与预测但不会长期写入缓存。
             predictions = model.inference_streaming(
                 images,
                 num_scale_frames=args.num_scale_frames,
@@ -551,6 +559,7 @@ def main():
                 output_device=output_device,
             )
         else:  # windowed
+            # 中文导读：窗口模式面向很长的视频，把序列分块推理后再拼接结果。
             predictions = model.inference_windowed(
                 images,
                 window_size=args.window_size,

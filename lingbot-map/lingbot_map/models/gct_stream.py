@@ -357,6 +357,11 @@ class GCTStream(GCTBase):
         """
         Streaming inference: process scale frames first, then frame-by-frame.
 
+        中文导读：
+        - Phase 1 使用开头若干帧建立尺度和初始上下文。
+        - Phase 2 逐帧推理，历史帧信息主要通过 KV cache 复用。
+        - keyframe_interval > 1 时，非关键帧只临时参与注意力，不写入长期缓存。
+
         This method enables efficient online inference by:
         1. Processing initial scale frames together (bidirectional attention via scale token)
         2. Processing remaining frames one-by-one with KV cache (causal streaming)
@@ -413,6 +418,7 @@ class GCTStream(GCTBase):
 
         # Phase 1: Process scale frames together
         # These frames get bidirectional attention among themselves via scale token
+        # 中文导读：scale frames 决定全局尺度，后续单帧会沿用这个尺度上下文。
         logger.info(f'Processing {scale_frames} scale frames...')
         scale_images = images[:, :scale_frames].to(_model_device, non_blocking=True)
         # No-op unless hot modules were compiled with mode="reduce-overhead";
@@ -434,6 +440,7 @@ class GCTStream(GCTBase):
         del scale_output
 
         # Phase 2: Process remaining frames one-by-one
+        # 中文导读：每次只把当前帧送上 GPU，适合长序列；KV cache 保存历史上下文。
         pbar = tqdm(
             range(scale_frames, S),
             desc='Streaming inference',
