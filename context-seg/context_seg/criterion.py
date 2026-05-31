@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .matcher import HungarianMatcher
 from .types import MaskTargets
 
 
@@ -25,17 +24,11 @@ class SetCriterion(nn.Module):
     step once target cache format and training data are fixed.
     """
 
-    def __init__(
-        self,
-        bce_weight: float = 1.0,
-        dice_weight: float = 1.0,
-        matcher: Optional[HungarianMatcher] = None,
-    ) -> None:
+    def __init__(self, bce_weight: float = 1.0, dice_weight: float = 1.0) -> None:
         super().__init__()
-        # 中文导读：BCE 约束逐像素分类，Dice 更关注 mask 区域重叠；
+        # BCE 约束逐像素分类，Dice 更关注 mask 区域重叠；
         # 第一版先保留两个最常用的 mask loss。
         self.weights = LossWeights(bce=bce_weight, dice=dice_weight)
-        self.matcher = matcher if matcher is not None else HungarianMatcher()
 
     def forward(
         self,
@@ -46,81 +39,29 @@ class SetCriterion(nn.Module):
         """Compute mask losses for matched predictions.
 
         Args:
-            pred_masks: [Q, H, W] or [B, Q, H, W] logits.
-            targets: MaskTargets with masks [M, H, W], [B, M, H, W], or
-                aligned [B, Q, H, W].
-            matched_indices: Optional precomputed [2, K] indices for single-sample loss.
+            pred_masks: [B, Q, H, W] logits.
+            targets: MaskTargets with masks [B, Q, H, W] for this scaffold.
+            matched_indices: Reserved for future set matching.
         """
         if matched_indices is not None:
-            return self._loss_single(pred_masks, targets.masks, matched_indices)
-
-        if pred_masks.ndim == 3:
-            return self._loss_single(pred_masks, targets.masks)
-
-        if pred_masks.ndim != 4:
-            raise ValueError(f"Expected pred_masks [Q,H,W] or [B,Q,H,W], got {tuple(pred_masks.shape)}")
-
+            raise NotImplementedError("matched_indices support will be added with set matching")
         if pred_masks.shape != targets.masks.shape:
-            if targets.masks.ndim != 4 or targets.masks.shape[0] != pred_masks.shape[0]:
-                raise ValueError(
-                    "Batched SetCriterion expects targets [B,M,H,W] or aligned [B,Q,H,W]: "
-                    f"pred={tuple(pred_masks.shape)}, target={tuple(targets.masks.shape)}"
-                )
+            # 这里暂时要求 query 和目标 mask 已经一一对齐。
+            # 真正训练时通常需要 Hungarian matching 或基于 IoU 的匹配，把预测 query 对到 SAM masks。
+            raise ValueError(
+                "SetCriterion scaffold expects aligned pred/target masks with identical shapes: "
+                f"pred={tuple(pred_masks.shape)}, target={tuple(targets.masks.shape)}"
+            )
 
-        losses = []
-        loss_bce_values = []
-        loss_dice_values = []
-        for b in range(pred_masks.shape[0]):
-            sample_losses = self._loss_single(pred_masks[b], targets.masks[b])
-            losses.append(sample_losses["loss"])
-            loss_bce_values.append(sample_losses["loss_bce"])
-            loss_dice_values.append(sample_losses["loss_dice"])
-
-        loss_bce = torch.stack(loss_bce_values).mean()
-        loss_dice = torch.stack(loss_dice_values).mean()
+        target_masks = targets.masks.to(dtype=pred_masks.dtype, device=pred_masks.device)
+        loss_bce = F.binary_cross_entropy_with_logits(pred_masks, target_masks)
+        loss_dice = dice_loss(pred_masks, target_masks)
         total = self.weights.bce * loss_bce + self.weights.dice * loss_dice
         return {
             "loss": total,
             "loss_bce": loss_bce,
             "loss_dice": loss_dice,
         }
-
-    def _loss_single(
-        self,
-        pred_masks: torch.Tensor,
-        target_masks: torch.Tensor,
-        matched_indices: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
-        if pred_masks.ndim == 4 and pred_masks.shape[0] == 1:
-            pred_masks = pred_masks[0]
-        if target_masks.ndim == 4 and target_masks.shape[0] == 1:
-            target_masks = target_masks[0]
-        if pred_masks.ndim != 3 or target_masks.ndim != 3:
-            raise ValueError(
-                f"Expected single-sample masks [Q,H,W] and [M,H,W], got "
-                f"{tuple(pred_masks.shape)} and {tuple(target_masks.shape)}"
-            )
-
-        target_masks = target_masks.to(dtype=pred_masks.dtype, device=pred_masks.device)
-        if matched_indices is None:
-            match = self.matcher(pred_masks, target_masks)
-            pred_idx, target_idx = match.pred_indices, match.target_indices
-        else:
-            if matched_indices.shape[0] != 2:
-                raise ValueError("matched_indices must have shape [2, K]")
-            pred_idx = matched_indices[0].to(device=pred_masks.device, dtype=torch.long)
-            target_idx = matched_indices[1].to(device=pred_masks.device, dtype=torch.long)
-
-        if pred_idx.numel() == 0:
-            zero = pred_masks.sum() * 0.0
-            return {"loss": zero, "loss_bce": zero, "loss_dice": zero}
-
-        matched_pred = pred_masks[pred_idx]
-        matched_target = target_masks[target_idx]
-        loss_bce = F.binary_cross_entropy_with_logits(matched_pred, matched_target)
-        loss_dice = dice_loss(matched_pred, matched_target)
-        total = self.weights.bce * loss_bce + self.weights.dice * loss_dice
-        return {"loss": total, "loss_bce": loss_bce, "loss_dice": loss_dice}
 
 
 def dice_loss(pred_masks: torch.Tensor, target_masks: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
