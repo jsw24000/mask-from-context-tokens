@@ -73,6 +73,7 @@ train:
   max_target_masks: 12
   objectness_threshold: 0.5
   max_active_queries: 12
+  min_vis_mask_area_ratio: 0.001
   output_dir: /root/autodl-tmp/mask-from-context-tokens/context-seg/runs/autodl_hypersim_fast
   vis_interval: 50
   save_interval: 200

@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import yaml
 from PIL import Image
+from PIL import ImageDraw
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -37,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lingbot-checkpoint", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--resume", type=str, default=None, help="Resume segmentation head/optimizer from a checkpoint.")
+    parser.add_argument("--no-resume-optimizer", action="store_true", help="Only load head weights from --resume.")
     parser.add_argument("--overfit", action="store_true", help="Use small defaults for a quick overfit experiment")
     parser.add_argument("--dry-run", action="store_true", help="Run a dummy forward/loss shape check")
     parser.add_argument("--streaming-dry-run", action="store_true", help="Run streaming extractor with a fake LingBot model")
@@ -141,7 +144,7 @@ def train(args: argparse.Namespace) -> None:
         token_layer=cfg["model"]["token_layer"],
         freeze_backbone=True,
         use_no_grad=True,
-        kv_cache_camera_only=True,
+        kv_cache_camera_only=cfg["lingbot"].get("kv_cache_camera_only", True),
         kv_cache_sliding_window=cfg["lingbot"]["kv_cache_sliding_window"],
         kv_cache_scale_frames=cfg["lingbot"]["kv_cache_scale_frames"],
         kv_cache_cross_frame_special=cfg["lingbot"]["kv_cache_cross_frame_special"],
@@ -184,7 +187,10 @@ def train(args: argparse.Namespace) -> None:
         with open(log_path, "w", encoding="utf-8") as f:
             f.write("step scene loss loss_cls loss_mask loss_dice loss_aux pred_mean pred_max object_mean object_max active_queries num_targets num_matches\n")
 
-    print_training_summary(cfg, device, output_dir, lingbot_ckpt, len(dataset))
+    resume_state = load_resume_state(args.resume, device) if args.resume is not None else None
+    resume_loaded = False
+
+    print_training_summary(cfg, device, output_dir, lingbot_ckpt, len(dataset), args.resume)
     step = 0
     with tqdm(total=max_steps, desc="training", unit="step") as progress:
         while step < max_steps:
@@ -216,6 +222,14 @@ def train(args: argparse.Namespace) -> None:
                         lr=cfg["train"]["lr"],
                         weight_decay=cfg["train"]["weight_decay"],
                     )
+                    if resume_state is not None and not resume_loaded:
+                        load_training_state(
+                            resume_state,
+                            seg_head,
+                            optimizer,
+                            load_optimizer=not args.no_resume_optimizer,
+                        )
+                        resume_loaded = True
 
                 assert seg_head is not None and optimizer is not None
                 optimizer.zero_grad(set_to_none=True)
@@ -310,8 +324,10 @@ def train(args: argparse.Namespace) -> None:
                         last_logits,
                         last_target,
                         last_pred_logits,
+                        matcher=matcher,
                         objectness_threshold=cfg["train"].get("objectness_threshold", 0.5),
                         max_active_queries=cfg["train"].get("max_active_queries"),
+                        min_mask_area_ratio=cfg["train"].get("min_vis_mask_area_ratio", 0.001),
                     )
                 if step % int(cfg["train"]["save_interval"]) == 0:
                     save_checkpoint(output_dir / f"checkpoint_step_{step:06d}.pt", seg_head, optimizer, cfg, step)
@@ -369,6 +385,29 @@ def save_checkpoint(
     )
 
 
+def load_resume_state(path: str | Path, device: torch.device) -> dict[str, Any]:
+    ckpt_path = resolve_path(path)
+    state = torch.load(ckpt_path, map_location=device, weights_only=False)
+    if "seg_head" not in state:
+        raise KeyError(f"Checkpoint does not contain 'seg_head': {ckpt_path}")
+    print(f"Resume checkpoint: {ckpt_path} (saved step={state.get('step', 'unknown')})")
+    return state
+
+
+def load_training_state(
+    state: dict[str, Any],
+    seg_head: Mask2FormerLiteHead,
+    optimizer: torch.optim.Optimizer,
+    load_optimizer: bool = True,
+) -> None:
+    seg_head.load_state_dict(state["seg_head"], strict=True)
+    if load_optimizer and "optimizer" in state:
+        optimizer.load_state_dict(state["optimizer"])
+        print("Loaded segmentation head and optimizer state from checkpoint.")
+    else:
+        print("Loaded segmentation head weights from checkpoint; optimizer starts fresh.")
+
+
 def average_loss_dicts(loss_dicts: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     if not loss_dicts:
         raise ValueError("No losses were produced for this training step")
@@ -399,6 +438,7 @@ def print_training_summary(
     output_dir: Path,
     lingbot_ckpt: Path,
     num_clips: int,
+    resume: str | None = None,
 ) -> None:
     print("Training configuration")
     print(f"  device: {device}")
@@ -406,6 +446,8 @@ def print_training_summary(
     print(f"  data.root: {resolve_path(cfg['data']['root'])}")
     print(f"  data.mask_root: {resolve_path(cfg['data']['mask_root'])}")
     print(f"  lingbot.checkpoint: {lingbot_ckpt}")
+    if resume is not None:
+        print(f"  resume: {resolve_path(resume)}")
     print(f"  clips: {num_clips}")
     print(f"  max_steps: {cfg['train']['max_steps']}")
     print(f"  head_type: {cfg['model'].get('head_type', 'mask2former_lite')}")
@@ -425,13 +467,21 @@ def save_mask_visualization(
     pred_logits: torch.Tensor,
     target_masks: torch.Tensor,
     class_logits: torch.Tensor,
+    matcher: HungarianMatcher | None = None,
     top_k: int = 4,
     objectness_threshold: float = 0.5,
     max_active_queries: int | None = None,
+    min_mask_area_ratio: float = 0.001,
+    mask_threshold: float = 0.5,
 ) -> None:
     pred_prob = pred_logits.sigmoid()
     objectness_prob = class_logits.softmax(dim=-1)[:, 1]
     active_indices = torch.nonzero(objectness_prob >= float(objectness_threshold), as_tuple=False).flatten()
+    raw_active_indices = active_indices.clone()
+    if active_indices.numel() > 0 and min_mask_area_ratio > 0:
+        bin_masks = pred_prob[active_indices] >= float(mask_threshold)
+        areas = bin_masks.flatten(1).float().mean(dim=1)
+        active_indices = active_indices[areas >= float(min_mask_area_ratio)]
     if max_active_queries is not None and active_indices.numel() > int(max_active_queries):
         top_active = torch.argsort(objectness_prob[active_indices], descending=True)[: int(max_active_queries)]
         active_indices = active_indices[top_active]
@@ -443,14 +493,35 @@ def save_mask_visualization(
         target = target_masks.max(dim=0).values.numpy()
     else:
         target = np.zeros_like(pred)
-    panels = [_to_uint8(pred), _to_uint8(target)]
+
+    match = matcher(pred_logits, target_masks, class_logits) if matcher is not None and target_masks.numel() > 0 else None
+    if match is not None and match.pred_indices.numel() > 0:
+        matched_union = pred_prob[match.pred_indices].max(dim=0).values.numpy()
+        matched_order = _sort_matches_by_iou(pred_prob, target_masks, match.pred_indices, match.target_indices)
+    else:
+        matched_union = np.zeros_like(pred)
+        matched_order = []
+
     query_scores = objectness_prob
     top_indices = torch.argsort(query_scores, descending=True)[:top_k]
+    row1 = [
+        _panel("active_union", pred),
+        _panel("target_union", target),
+        _panel("matched_union", matched_union),
+    ]
     for idx in top_indices:
-        panels.append(_to_uint8(pred_prob[int(idx)].numpy()))
-    while len(panels) < 2 + top_k:
-        panels.append(np.zeros_like(panels[0]))
-    canvas = np.concatenate(panels, axis=1)
+        row1.append(_panel(f"top_obj q{int(idx)} {float(query_scores[int(idx)]):.2f}", pred_prob[int(idx)].numpy()))
+
+    row2 = []
+    for pred_idx, target_idx, iou in matched_order[: 3 + top_k]:
+        row2.append(_panel(f"match q{pred_idx}->t{target_idx} iou{iou:.2f}", pred_prob[pred_idx].numpy()))
+    while len(row2) < len(row1):
+        row2.append(_panel("", np.zeros_like(pred)))
+
+    panel_h, panel_w = row1[0].shape
+    row1 = _pad_panels(row1, panel_h, panel_w)
+    row2 = _pad_panels(row2, panel_h, panel_w)
+    canvas = np.concatenate([np.concatenate(row1, axis=1), np.concatenate(row2, axis=1)], axis=0)
     Image.fromarray(canvas).save(path)
     stats_path = path.with_suffix(".txt")
     with open(stats_path, "w", encoding="utf-8") as f:
@@ -460,13 +531,60 @@ def save_mask_visualization(
         f.write(f"object_prob_min {float(objectness_prob.min()):.6f}\n")
         f.write(f"object_prob_mean {float(objectness_prob.mean()):.6f}\n")
         f.write(f"object_prob_max {float(objectness_prob.max()):.6f}\n")
+        f.write(f"raw_active_query_count {int(raw_active_indices.numel())}\n")
+        f.write(f"area_filtered_active_query_count {int(active_indices.numel())}\n")
         f.write(f"active_query_indices {[int(i) for i in active_indices]}\n")
         f.write(f"top_query_indices {[int(i) for i in top_indices]}\n")
         f.write(f"top_query_scores {[float(query_scores[int(i)]) for i in top_indices]}\n")
+        if match is not None:
+            f.write(f"matched_query_indices {[int(i) for i in match.pred_indices]}\n")
+            f.write(f"matched_target_indices {[int(i) for i in match.target_indices]}\n")
+            f.write(f"matched_iou_sorted {matched_order}\n")
 
 
 def _to_uint8(arr: np.ndarray) -> np.ndarray:
     return (arr * 255).clip(0, 255).astype(np.uint8)
+
+
+def _panel(title: str, arr: np.ndarray) -> np.ndarray:
+    image = Image.fromarray(_to_uint8(arr)).convert("L")
+    label_h = 18
+    canvas = Image.new("L", (image.width, image.height + label_h), color=0)
+    canvas.paste(image, (0, label_h))
+    if title:
+        ImageDraw.Draw(canvas).text((4, 2), title, fill=255)
+    return np.asarray(canvas)
+
+
+def _pad_panels(panels: list[np.ndarray], height: int, width: int) -> list[np.ndarray]:
+    padded = []
+    for panel in panels:
+        if panel.shape == (height, width):
+            padded.append(panel)
+            continue
+        out = np.zeros((height, width), dtype=np.uint8)
+        h = min(height, panel.shape[0])
+        w = min(width, panel.shape[1])
+        out[:h, :w] = panel[:h, :w]
+        padded.append(out)
+    return padded
+
+
+def _sort_matches_by_iou(
+    pred_prob: torch.Tensor,
+    target_masks: torch.Tensor,
+    pred_indices: torch.Tensor,
+    target_indices: torch.Tensor,
+    threshold: float = 0.5,
+) -> list[tuple[int, int, float]]:
+    items = []
+    for pred_idx, target_idx in zip(pred_indices.tolist(), target_indices.tolist()):
+        pred = pred_prob[pred_idx] >= threshold
+        target = target_masks[target_idx] > 0.5
+        intersection = torch.logical_and(pred, target).sum().float()
+        union = torch.logical_or(pred, target).sum().float().clamp_min(1.0)
+        items.append((int(pred_idx), int(target_idx), float((intersection / union).cpu())))
+    return sorted(items, key=lambda item: item[2], reverse=True)
 
 
 def main() -> None:
