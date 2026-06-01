@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Interface scaffold for instance segmentation from LingBot-Map context tokens"
 requires-python = ">=3.10"
 dependencies = [
+    "h5py",
     "numpy",
     "Pillow",
     "psutil",
