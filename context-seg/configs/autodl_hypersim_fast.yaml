@@ -14,9 +14,11 @@ model:
 data:
   root: /root/autodl-tmp/mask-from-context-tokens/data_hypersim
   mask_root: /root/autodl-tmp/mask-from-context-tokens/data_hypersim_masks
-  clip_length: 8
-  num_scale_frames: 2
-  clip_stride: 1
+  # Use LingBot-like anchor frames while keeping the first long-clip run affordable.
+  # Per-step time is roughly proportional to clip_length because every frame gets a mask loss.
+  clip_length: 16
+  num_scale_frames: 8
+  clip_stride: 4
   limit_scenes:
   limit_clips:
   overfit_limit_clips: 4
