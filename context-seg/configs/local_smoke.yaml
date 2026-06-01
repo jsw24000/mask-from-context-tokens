@@ -38,13 +38,14 @@ sam:
   model_type: vit_h
 
 matcher:
-  cost_bce: 1.0
-  cost_dice: 1.0
+  cost_bce: 0.5
+  cost_dice: 2.0
   cost_size: 96
 
 loss:
-  bce_weight: 1.0
-  dice_weight: 1.0
+  bce_weight: 0.2
+  dice_weight: 2.0
+  balanced_bce: true
 
 train:
   batch_size: 1

@@ -10,6 +10,7 @@ import torch
 import yaml
 from PIL import Image
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROJECT_ROOT.parent
@@ -162,85 +163,114 @@ def train(args: argparse.Namespace) -> None:
     criterion = SetCriterion(
         bce_weight=cfg["loss"]["bce_weight"],
         dice_weight=cfg["loss"]["dice_weight"],
+        balanced_bce=cfg["loss"].get("balanced_bce", True),
         matcher=matcher,
     )
 
     max_steps = int(cfg["train"]["max_steps"])
     log_path = output_dir / "train_log.txt"
+    if not log_path.exists() or log_path.stat().st_size == 0:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("step scene loss loss_bce loss_dice pred_mean pred_max num_matches\n")
+
+    print_training_summary(cfg, device, output_dir, lingbot_ckpt, len(dataset))
     step = 0
-    while step < max_steps:
-        for sample in loader:
-            if step >= max_steps:
-                break
-            images = sample.images.to(device)
-            frame_outputs = list(
-                extractor.stream_sequence(
-                    images,
-                    num_scale_frames=cfg["data"]["num_scale_frames"],
-                    keyframe_interval=cfg["lingbot"].get("keyframe_interval", 1),
+    with tqdm(total=max_steps, desc="training", unit="step") as progress:
+        while step < max_steps:
+            for sample in loader:
+                if step >= max_steps:
+                    break
+                images = sample.images.to(device)
+                frame_outputs = list(
+                    extractor.stream_sequence(
+                        images,
+                        num_scale_frames=cfg["data"]["num_scale_frames"],
+                        keyframe_interval=cfg["lingbot"].get("keyframe_interval", 1),
+                    )
                 )
-            )
 
-            if predictor is None or decoder is None or optimizer is None:
-                context_dim = int(frame_outputs[0].patch_tokens.shape[-1])
-                predictor = InstanceQueryPredictor(
-                    context_dim=context_dim,
-                    hidden_dim=cfg["model"]["hidden_dim"],
-                    num_queries=cfg["model"]["num_queries"],
-                    num_heads=cfg["model"]["num_attention_heads"],
-                    num_layers=cfg["model"]["num_predictor_layers"],
-                ).to(device)
-                decoder = MaskDecoder(
-                    query_dim=cfg["model"]["hidden_dim"],
-                    patch_dim=context_dim,
-                    hidden_dim=cfg["model"]["hidden_dim"],
-                ).to(device)
-                optimizer = torch.optim.AdamW(
+                if predictor is None or decoder is None or optimizer is None:
+                    context_dim = int(frame_outputs[0].patch_tokens.shape[-1])
+                    predictor = InstanceQueryPredictor(
+                        context_dim=context_dim,
+                        hidden_dim=cfg["model"]["hidden_dim"],
+                        num_queries=cfg["model"]["num_queries"],
+                        num_heads=cfg["model"]["num_attention_heads"],
+                        num_layers=cfg["model"]["num_predictor_layers"],
+                    ).to(device)
+                    decoder = MaskDecoder(
+                        query_dim=cfg["model"]["hidden_dim"],
+                        patch_dim=context_dim,
+                        hidden_dim=cfg["model"]["hidden_dim"],
+                    ).to(device)
+                    optimizer = torch.optim.AdamW(
+                        list(predictor.parameters()) + list(decoder.parameters()),
+                        lr=cfg["train"]["lr"],
+                        weight_decay=cfg["train"]["weight_decay"],
+                    )
+
+                assert predictor is not None and decoder is not None and optimizer is not None
+                optimizer.zero_grad(set_to_none=True)
+
+                loss_dicts = []
+                cursor = 0
+                last_logits = None
+                last_target = None
+                for context in frame_outputs:
+                    query_embeddings = predictor(context.patch_tokens)
+                    mask_logits = decoder(query_embeddings, context.patch_tokens, context.patch_grid, context.image_size)
+                    _, chunk_frames = mask_logits.shape[:2]
+                    for local_idx in range(chunk_frames):
+                        target = sample.target_masks[cursor].to(device)
+                        max_targets = cfg["train"].get("max_target_masks")
+                        if max_targets is not None:
+                            target = target[: int(max_targets)]
+                        loss_dict = criterion(mask_logits[0, local_idx], MaskTargets(masks=target))
+                        loss_dicts.append(loss_dict)
+                        last_logits = mask_logits[0, local_idx].detach().cpu()
+                        last_target = target.detach().cpu()
+                        cursor += 1
+
+                metrics = average_loss_dicts(loss_dicts)
+                loss = metrics["loss"]
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
                     list(predictor.parameters()) + list(decoder.parameters()),
-                    lr=cfg["train"]["lr"],
-                    weight_decay=cfg["train"]["weight_decay"],
+                    cfg["train"].get("grad_clip", 1.0),
                 )
+                optimizer.step()
 
-            assert predictor is not None and decoder is not None and optimizer is not None
-            optimizer.zero_grad(set_to_none=True)
+                step += 1
+                log_values = {
+                    "loss": float(metrics["loss"].detach().cpu()),
+                    "loss_bce": float(metrics["loss_bce"].detach().cpu()),
+                    "loss_dice": float(metrics["loss_dice"].detach().cpu()),
+                    "pred_mean": float(metrics["pred_prob_mean"].detach().cpu()),
+                    "pred_max": float(metrics["pred_prob_max"].detach().cpu()),
+                    "num_matches": float(metrics["num_matches"].detach().cpu()),
+                }
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(
+                        f"{step} {sample.scene} {log_values['loss']:.6f} {log_values['loss_bce']:.6f} "
+                        f"{log_values['loss_dice']:.6f} {log_values['pred_mean']:.6f} "
+                        f"{log_values['pred_max']:.6f} {log_values['num_matches']:.1f}\n"
+                    )
 
-            losses = []
-            cursor = 0
-            last_logits = None
-            last_target = None
-            for context in frame_outputs:
-                query_embeddings = predictor(context.patch_tokens)
-                mask_logits = decoder(query_embeddings, context.patch_tokens, context.patch_grid, context.image_size)
-                _, chunk_frames = mask_logits.shape[:2]
-                for local_idx in range(chunk_frames):
-                    target = sample.target_masks[cursor].to(device)
-                    max_targets = cfg["train"].get("max_target_masks")
-                    if max_targets is not None:
-                        target = target[: int(max_targets)]
-                    loss_dict = criterion(mask_logits[0, local_idx], MaskTargets(masks=target))
-                    losses.append(loss_dict["loss"])
-                    last_logits = mask_logits[0, local_idx].detach().cpu()
-                    last_target = target.detach().cpu()
-                    cursor += 1
+                progress.set_postfix(
+                    scene=sample.scene,
+                    loss=f"{log_values['loss']:.4f}",
+                    bce=f"{log_values['loss_bce']:.4f}",
+                    dice=f"{log_values['loss_dice']:.4f}",
+                    pmean=f"{log_values['pred_mean']:.3f}",
+                    pmax=f"{log_values['pred_max']:.3f}",
+                    matches=f"{log_values['num_matches']:.0f}",
+                )
+                progress.update(1)
 
-            loss = torch.stack(losses).mean()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(predictor.parameters()) + list(decoder.parameters()),
-                cfg["train"].get("grad_clip", 1.0),
-            )
-            optimizer.step()
-
-            step += 1
-            msg = f"step={step} scene={sample.scene} loss={loss.item():.6f}"
-            print(msg)
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(msg + "\n")
-
-            if step % int(cfg["train"]["vis_interval"]) == 0 and last_logits is not None and last_target is not None:
-                save_mask_visualization(output_dir / "vis" / f"step_{step:06d}.png", last_logits, last_target)
-            if step % int(cfg["train"]["save_interval"]) == 0:
-                save_checkpoint(output_dir / f"checkpoint_step_{step:06d}.pt", predictor, decoder, optimizer, cfg, step)
+                if step % int(cfg["train"]["vis_interval"]) == 0 and last_logits is not None and last_target is not None:
+                    save_mask_visualization(output_dir / "vis" / f"step_{step:06d}.png", last_logits, last_target)
+                if step % int(cfg["train"]["save_interval"]) == 0:
+                    save_checkpoint(output_dir / f"checkpoint_step_{step:06d}.pt", predictor, decoder, optimizer, cfg, step)
 
     if predictor is not None and decoder is not None and optimizer is not None:
         save_checkpoint(output_dir / "checkpoint_last.pt", predictor, decoder, optimizer, cfg, step)
@@ -297,16 +327,68 @@ def save_checkpoint(
     )
 
 
-def save_mask_visualization(path: Path, pred_logits: torch.Tensor, target_masks: torch.Tensor) -> None:
-    pred = pred_logits.sigmoid().max(dim=0).values.numpy()
+def average_loss_dicts(loss_dicts: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    if not loss_dicts:
+        raise ValueError("No losses were produced for this training step")
+    keys = ("loss", "loss_bce", "loss_dice", "pred_prob_mean", "pred_prob_max", "num_matches")
+    averaged = {}
+    for key in keys:
+        values = torch.stack([item[key] for item in loss_dicts])
+        averaged[key] = values.sum() if key == "num_matches" else values.mean()
+    return averaged
+
+
+def print_training_summary(
+    cfg: dict[str, Any],
+    device: torch.device,
+    output_dir: Path,
+    lingbot_ckpt: Path,
+    num_clips: int,
+) -> None:
+    print("Training configuration")
+    print(f"  device: {device}")
+    print(f"  output_dir: {output_dir}")
+    print(f"  data.root: {resolve_path(cfg['data']['root'])}")
+    print(f"  data.mask_root: {resolve_path(cfg['data']['mask_root'])}")
+    print(f"  lingbot.checkpoint: {lingbot_ckpt}")
+    print(f"  clips: {num_clips}")
+    print(f"  max_steps: {cfg['train']['max_steps']}")
+    print(f"  num_queries: {cfg['model']['num_queries']}")
+    print(
+        "  loss: "
+        f"bce_weight={cfg['loss']['bce_weight']}, "
+        f"dice_weight={cfg['loss']['dice_weight']}, "
+        f"balanced_bce={cfg['loss'].get('balanced_bce', True)}"
+    )
+
+
+def save_mask_visualization(path: Path, pred_logits: torch.Tensor, target_masks: torch.Tensor, top_k: int = 4) -> None:
+    pred_prob = pred_logits.sigmoid()
+    pred = pred_prob.max(dim=0).values.numpy()
     if target_masks.numel() > 0:
         target = target_masks.max(dim=0).values.numpy()
     else:
         target = np.zeros_like(pred)
-    pred_img = (pred * 255).clip(0, 255).astype(np.uint8)
-    target_img = (target * 255).clip(0, 255).astype(np.uint8)
-    canvas = np.concatenate([pred_img, target_img], axis=1)
+    panels = [_to_uint8(pred), _to_uint8(target)]
+    query_scores = pred_prob.flatten(1).max(dim=1).values
+    top_indices = torch.argsort(query_scores, descending=True)[:top_k]
+    for idx in top_indices:
+        panels.append(_to_uint8(pred_prob[int(idx)].numpy()))
+    while len(panels) < 2 + top_k:
+        panels.append(np.zeros_like(panels[0]))
+    canvas = np.concatenate(panels, axis=1)
     Image.fromarray(canvas).save(path)
+    stats_path = path.with_suffix(".txt")
+    with open(stats_path, "w", encoding="utf-8") as f:
+        f.write(f"pred_min {float(pred_prob.min()):.6f}\n")
+        f.write(f"pred_mean {float(pred_prob.mean()):.6f}\n")
+        f.write(f"pred_max {float(pred_prob.max()):.6f}\n")
+        f.write(f"top_query_indices {[int(i) for i in top_indices]}\n")
+        f.write(f"top_query_scores {[float(query_scores[int(i)]) for i in top_indices]}\n")
+
+
+def _to_uint8(arr: np.ndarray) -> np.ndarray:
+    return (arr * 255).clip(0, 255).astype(np.uint8)
 
 
 def main() -> None:
@@ -353,4 +435,3 @@ class _FakeStreamingLingbot(torch.nn.Module):
 
 if __name__ == "__main__":
     main()
-

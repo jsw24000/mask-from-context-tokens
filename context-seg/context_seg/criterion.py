@@ -28,10 +28,12 @@ class SetCriterion(nn.Module):
         self,
         bce_weight: float = 1.0,
         dice_weight: float = 1.0,
+        balanced_bce: bool = True,
         matcher: Optional[HungarianMatcher] = None,
     ) -> None:
         super().__init__()
         self.weights = LossWeights(bce=bce_weight, dice=dice_weight)
+        self.balanced_bce = bool(balanced_bce)
         self.matcher = matcher if matcher is not None else HungarianMatcher()
 
     def forward(
@@ -65,18 +67,30 @@ class SetCriterion(nn.Module):
 
         loss_bce_values = []
         loss_dice_values = []
+        num_match_values = []
+        pred_prob_mean_values = []
+        pred_prob_max_values = []
         for b in range(pred_masks.shape[0]):
             sample_losses = self._loss_single(pred_masks[b], targets.masks[b])
             loss_bce_values.append(sample_losses["loss_bce"])
             loss_dice_values.append(sample_losses["loss_dice"])
+            num_match_values.append(sample_losses["num_matches"])
+            pred_prob_mean_values.append(sample_losses["pred_prob_mean"])
+            pred_prob_max_values.append(sample_losses["pred_prob_max"])
 
         loss_bce = torch.stack(loss_bce_values).mean()
         loss_dice = torch.stack(loss_dice_values).mean()
+        num_matches = torch.stack(num_match_values).sum()
+        pred_prob_mean = torch.stack(pred_prob_mean_values).mean()
+        pred_prob_max = torch.stack(pred_prob_max_values).max()
         total = self.weights.bce * loss_bce + self.weights.dice * loss_dice
         return {
             "loss": total,
             "loss_bce": loss_bce,
             "loss_dice": loss_dice,
+            "num_matches": num_matches,
+            "pred_prob_mean": pred_prob_mean,
+            "pred_prob_max": pred_prob_max,
         }
 
     def _loss_single(
@@ -107,14 +121,47 @@ class SetCriterion(nn.Module):
 
         if pred_idx.numel() == 0:
             zero = pred_masks.sum() * 0.0
-            return {"loss": zero, "loss_bce": zero, "loss_dice": zero}
+            return {
+                "loss": zero,
+                "loss_bce": zero,
+                "loss_dice": zero,
+                "num_matches": zero,
+                "pred_prob_mean": zero,
+                "pred_prob_max": zero,
+            }
 
         matched_pred = pred_masks[pred_idx]
         matched_target = target_masks[target_idx]
-        loss_bce = F.binary_cross_entropy_with_logits(matched_pred, matched_target)
+        if self.balanced_bce:
+            loss_bce = balanced_bce_with_logits(matched_pred, matched_target)
+        else:
+            loss_bce = F.binary_cross_entropy_with_logits(matched_pred, matched_target)
         loss_dice = dice_loss(matched_pred, matched_target)
         total = self.weights.bce * loss_bce + self.weights.dice * loss_dice
-        return {"loss": total, "loss_bce": loss_bce, "loss_dice": loss_dice}
+        matched_prob = matched_pred.sigmoid()
+        return {
+            "loss": total,
+            "loss_bce": loss_bce,
+            "loss_dice": loss_dice,
+            "num_matches": torch.as_tensor(float(pred_idx.numel()), device=pred_masks.device),
+            "pred_prob_mean": matched_prob.mean(),
+            "pred_prob_max": matched_prob.max(),
+        }
+
+
+def balanced_bce_with_logits(
+    pred_masks: torch.Tensor,
+    target_masks: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Average foreground and background BCE so empty background cannot dominate."""
+    bce = F.binary_cross_entropy_with_logits(pred_masks, target_masks, reduction="none")
+    target = target_masks.to(dtype=bce.dtype)
+    foreground = target
+    background = 1.0 - target
+    fg_loss = (bce * foreground).flatten(1).sum(dim=1) / foreground.flatten(1).sum(dim=1).clamp_min(eps)
+    bg_loss = (bce * background).flatten(1).sum(dim=1) / background.flatten(1).sum(dim=1).clamp_min(eps)
+    return (0.5 * (fg_loss + bg_loss)).mean()
 
 
 def dice_loss(pred_masks: torch.Tensor, target_masks: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
