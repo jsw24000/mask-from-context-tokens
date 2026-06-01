@@ -19,8 +19,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from context_seg import (
     HungarianMatcher,
+    Mask2FormerLiteHead,
     MaskTargets,
-    QueryInstanceHead,
+    PseudoMaskFilter,
     SetCriterion,
     StreamingLingbotTokenExtractor,
     VideoFrameDataset,
@@ -49,18 +50,20 @@ def dry_run() -> None:
     patch_grid = (37, 37)
 
     patch_tokens = torch.randn(batch, tokens, context_dim)
-    query_head = QueryInstanceHead(
+    seg_head = Mask2FormerLiteHead(
         context_dim=context_dim,
         hidden_dim=hidden_dim,
+        pixel_dim=hidden_dim,
         num_queries=queries,
         num_heads=8,
-        num_layers=2,
+        decoder_layers=2,
     )
     criterion = SetCriterion()
 
-    output = query_head(patch_tokens, patch_grid=patch_grid, image_size=image_size)
+    output = seg_head(patch_tokens, patch_grid=patch_grid, image_size=image_size)
     targets = MaskTargets(masks=torch.randint(0, 2, (8, *image_size)).float())
-    losses = criterion(output.mask_logits[0], targets, output.objectness_logits[0])
+    aux_outputs = tuple({"pred_masks": aux["pred_masks"][0], "pred_logits": aux["pred_logits"][0]} for aux in output.aux_outputs)
+    losses = criterion(output.mask_logits[0], targets, output.pred_logits[0], aux_outputs=aux_outputs)
 
     print("dry-run ok")
     print(f"query_embeddings: {tuple(output.query_embeddings.shape)}")
@@ -76,12 +79,13 @@ def streaming_dry_run() -> None:
 
     fake_lingbot = _FakeStreamingLingbot(patch_size=patch_size, context_dim=context_dim)
     extractor = StreamingLingbotTokenExtractor(fake_lingbot, require_camera_only_cache=True)
-    query_head = QueryInstanceHead(
+    seg_head = Mask2FormerLiteHead(
         context_dim=context_dim,
         hidden_dim=hidden_dim,
+        pixel_dim=hidden_dim,
         num_queries=num_queries,
         num_heads=4,
-        num_layers=1,
+        decoder_layers=1,
     )
 
     outputs = list(
@@ -92,7 +96,7 @@ def streaming_dry_run() -> None:
         )
     )
     step_tokens = outputs[-1]
-    head_output = query_head(step_tokens.patch_tokens, step_tokens.patch_grid, step_tokens.image_size)
+    head_output = seg_head(step_tokens.patch_tokens, step_tokens.patch_grid, step_tokens.image_size)
 
     print("streaming dry-run ok")
     print(f"num_outputs: {len(outputs)}")
@@ -149,32 +153,36 @@ def train(args: argparse.Namespace) -> None:
         use_sdpa=cfg["lingbot"].get("use_sdpa", False),
     )
 
-    query_head = None
+    seg_head = None
     optimizer = None
     matcher = HungarianMatcher(
-        cost_bce=cfg["matcher"]["cost_bce"],
+        cost_class=cfg["matcher"].get("cost_class", cfg["matcher"].get("cost_objectness", 2.0)),
+        cost_mask=cfg["matcher"].get("cost_mask", cfg["matcher"].get("cost_bce", 5.0)),
         cost_dice=cfg["matcher"]["cost_dice"],
-        cost_objectness=cfg["matcher"].get("cost_objectness", 1.0),
         cost_size=cfg["matcher"]["cost_size"],
     )
     criterion = SetCriterion(
-        bce_weight=cfg["loss"].get("mask_bce_weight", cfg["loss"].get("bce_weight", 0.2)),
-        dice_weight=cfg["loss"].get("mask_dice_weight", cfg["loss"].get("dice_weight", 2.0)),
-        objectness_weight=cfg["loss"].get("objectness_weight", 1.0),
+        class_weight=cfg["loss"].get("class_weight", cfg["loss"].get("objectness_weight", 2.0)),
+        mask_weight=cfg["loss"].get("mask_weight", cfg["loss"].get("mask_bce_weight", 5.0)),
+        dice_weight=cfg["loss"].get("dice_weight", cfg["loss"].get("mask_dice_weight", 5.0)),
         no_object_weight=cfg["loss"].get("no_object_weight", 0.1),
-        objectness_threshold=cfg["train"].get("objectness_threshold", 0.5),
-        balanced_bce=cfg["loss"].get("balanced_bce", True),
+        num_points=cfg["loss"].get("num_points", 12544),
+        oversample_ratio=cfg["loss"].get("oversample_ratio", 3.0),
+        importance_sample_ratio=cfg["loss"].get("importance_sample_ratio", 0.75),
         matcher=matcher,
+    )
+    mask_filter = PseudoMaskFilter(
+        min_area_ratio=cfg.get("pseudo_mask", {}).get("min_area_ratio", 0.001),
+        max_area_ratio=cfg.get("pseudo_mask", {}).get("max_area_ratio", 0.6),
+        nms_iou=cfg.get("pseudo_mask", {}).get("nms_iou", 0.8),
+        max_masks=cfg["train"].get("max_target_masks", 20),
     )
 
     max_steps = int(cfg["train"]["max_steps"])
     log_path = output_dir / "train_log.txt"
     if not log_path.exists() or log_path.stat().st_size == 0:
         with open(log_path, "w", encoding="utf-8") as f:
-            f.write(
-                "step scene loss loss_mask_bce loss_mask_dice loss_objectness "
-                "pred_mean pred_max objectness_mean objectness_max active_queries num_matches\n"
-            )
+            f.write("step scene loss loss_cls loss_mask loss_dice loss_aux pred_mean pred_max object_mean object_max active_queries num_targets num_matches\n")
 
     print_training_summary(cfg, device, output_dir, lingbot_ckpt, len(dataset))
     step = 0
@@ -192,48 +200,55 @@ def train(args: argparse.Namespace) -> None:
                     )
                 )
 
-                if query_head is None or optimizer is None:
+                if seg_head is None or optimizer is None:
                     context_dim = int(frame_outputs[0].patch_tokens.shape[-1])
-                    query_head = QueryInstanceHead(
+                    seg_head = Mask2FormerLiteHead(
                         context_dim=context_dim,
                         hidden_dim=cfg["model"]["hidden_dim"],
+                        pixel_dim=cfg["model"].get("pixel_dim", cfg["model"]["hidden_dim"]),
                         num_queries=cfg["model"]["num_queries"],
                         num_heads=cfg["model"]["num_attention_heads"],
-                        num_layers=cfg["model"]["num_predictor_layers"],
-                        mask_hidden_dim=cfg["model"].get("mask_hidden_dim"),
+                        decoder_layers=cfg["model"].get("decoder_layers", cfg["model"].get("num_predictor_layers", 6)),
+                        ffn_dim=cfg["model"].get("ffn_dim", 4 * cfg["model"]["hidden_dim"]),
                     ).to(device)
                     optimizer = torch.optim.AdamW(
-                        query_head.parameters(),
+                        seg_head.parameters(),
                         lr=cfg["train"]["lr"],
                         weight_decay=cfg["train"]["weight_decay"],
                     )
 
-                assert query_head is not None and optimizer is not None
+                assert seg_head is not None and optimizer is not None
                 optimizer.zero_grad(set_to_none=True)
 
                 loss_dicts = []
                 cursor = 0
                 last_logits = None
-                last_objectness = None
+                last_pred_logits = None
                 last_target = None
                 for context in frame_outputs:
-                    head_output = query_head(context.patch_tokens, context.patch_grid, context.image_size)
+                    head_output = seg_head(context.patch_tokens, context.patch_grid, context.image_size)
                     mask_logits = head_output.mask_logits
-                    objectness_logits = head_output.objectness_logits
+                    pred_logits = head_output.pred_logits
                     _, chunk_frames = mask_logits.shape[:2]
                     for local_idx in range(chunk_frames):
                         target = sample.target_masks[cursor].to(device)
-                        max_targets = cfg["train"].get("max_target_masks")
-                        if max_targets is not None:
-                            target = target[: int(max_targets)]
+                        target = mask_filter(target, max_masks=cfg["train"].get("max_target_masks"))
+                        aux_outputs = tuple(
+                            {
+                                "pred_masks": aux["pred_masks"][0, local_idx],
+                                "pred_logits": aux["pred_logits"][0, local_idx],
+                            }
+                            for aux in head_output.aux_outputs
+                        )
                         loss_dict = criterion(
                             mask_logits[0, local_idx],
                             MaskTargets(masks=target),
-                            objectness_logits[0, local_idx],
+                            pred_logits[0, local_idx],
+                            aux_outputs=aux_outputs,
                         )
                         loss_dicts.append(loss_dict)
                         last_logits = mask_logits[0, local_idx].detach().cpu()
-                        last_objectness = objectness_logits[0, local_idx].detach().cpu()
+                        last_pred_logits = pred_logits[0, local_idx].detach().cpu()
                         last_target = target.detach().cpu()
                         cursor += 1
 
@@ -241,7 +256,7 @@ def train(args: argparse.Namespace) -> None:
                 loss = metrics["loss"]
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(
-                    query_head.parameters(),
+                    seg_head.parameters(),
                     cfg["train"].get("grad_clip", 1.0),
                 )
                 optimizer.step()
@@ -249,35 +264,38 @@ def train(args: argparse.Namespace) -> None:
                 step += 1
                 log_values = {
                     "loss": float(metrics["loss"].detach().cpu()),
-                    "loss_mask_bce": float(metrics["loss_mask_bce"].detach().cpu()),
-                    "loss_mask_dice": float(metrics["loss_mask_dice"].detach().cpu()),
-                    "loss_objectness": float(metrics["loss_objectness"].detach().cpu()),
+                    "loss_cls": float(metrics["loss_cls"].detach().cpu()),
+                    "loss_mask": float(metrics["loss_mask"].detach().cpu()),
+                    "loss_dice": float(metrics["loss_dice"].detach().cpu()),
+                    "loss_aux": float(metrics["loss_aux"].detach().cpu()),
                     "pred_mean": float(metrics["pred_prob_mean"].detach().cpu()),
                     "pred_max": float(metrics["pred_prob_max"].detach().cpu()),
-                    "objectness_mean": float(metrics["objectness_mean"].detach().cpu()),
-                    "objectness_max": float(metrics["objectness_max"].detach().cpu()),
+                    "object_mean": float(metrics["object_prob_mean"].detach().cpu()),
+                    "object_max": float(metrics["object_prob_max"].detach().cpu()),
                     "active_queries": float(metrics["active_queries"].detach().cpu()),
+                    "num_targets": float(metrics["num_targets"].detach().cpu()),
                     "num_matches": float(metrics["num_matches"].detach().cpu()),
                 }
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(
-                        f"{step} {sample.scene} {log_values['loss']:.6f} {log_values['loss_mask_bce']:.6f} "
-                        f"{log_values['loss_mask_dice']:.6f} {log_values['loss_objectness']:.6f} "
+                        f"{step} {sample.scene} {log_values['loss']:.6f} {log_values['loss_cls']:.6f} "
+                        f"{log_values['loss_mask']:.6f} {log_values['loss_dice']:.6f} {log_values['loss_aux']:.6f} "
                         f"{log_values['pred_mean']:.6f} {log_values['pred_max']:.6f} "
-                        f"{log_values['objectness_mean']:.6f} {log_values['objectness_max']:.6f} "
-                        f"{log_values['active_queries']:.1f} {log_values['num_matches']:.1f}\n"
+                        f"{log_values['object_mean']:.6f} {log_values['object_max']:.6f} "
+                        f"{log_values['active_queries']:.1f} {log_values['num_targets']:.1f} {log_values['num_matches']:.1f}\n"
                     )
 
                 progress.set_postfix(
                     scene=sample.scene,
                     loss=f"{log_values['loss']:.4f}",
-                    mbce=f"{log_values['loss_mask_bce']:.4f}",
-                    mdice=f"{log_values['loss_mask_dice']:.4f}",
-                    obj=f"{log_values['loss_objectness']:.4f}",
-                    omean=f"{log_values['objectness_mean']:.3f}",
-                    omax=f"{log_values['objectness_max']:.3f}",
+                    cls=f"{log_values['loss_cls']:.4f}",
+                    mask=f"{log_values['loss_mask']:.4f}",
+                    dice=f"{log_values['loss_dice']:.4f}",
+                    aux=f"{log_values['loss_aux']:.4f}",
+                    omean=f"{log_values['object_mean']:.3f}",
+                    omax=f"{log_values['object_max']:.3f}",
                     active=f"{log_values['active_queries']:.0f}",
-                    matches=f"{log_values['num_matches']:.0f}",
+                    targets=f"{log_values['num_targets']:.0f}",
                 )
                 progress.update(1)
 
@@ -285,21 +303,21 @@ def train(args: argparse.Namespace) -> None:
                     step % int(cfg["train"]["vis_interval"]) == 0
                     and last_logits is not None
                     and last_target is not None
-                    and last_objectness is not None
+                    and last_pred_logits is not None
                 ):
                     save_mask_visualization(
                         output_dir / "vis" / f"step_{step:06d}.png",
                         last_logits,
                         last_target,
-                        last_objectness,
+                        last_pred_logits,
                         objectness_threshold=cfg["train"].get("objectness_threshold", 0.5),
                         max_active_queries=cfg["train"].get("max_active_queries"),
                     )
                 if step % int(cfg["train"]["save_interval"]) == 0:
-                    save_checkpoint(output_dir / f"checkpoint_step_{step:06d}.pt", query_head, optimizer, cfg, step)
+                    save_checkpoint(output_dir / f"checkpoint_step_{step:06d}.pt", seg_head, optimizer, cfg, step)
 
-    if query_head is not None and optimizer is not None:
-        save_checkpoint(output_dir / "checkpoint_last.pt", query_head, optimizer, cfg, step)
+    if seg_head is not None and optimizer is not None:
+        save_checkpoint(output_dir / "checkpoint_last.pt", seg_head, optimizer, cfg, step)
 
 
 def load_config(path: str) -> dict[str, Any]:
@@ -335,7 +353,7 @@ def resolve_path(path: str | Path) -> Path:
 
 def save_checkpoint(
     path: Path,
-    query_head: QueryInstanceHead,
+    seg_head: Mask2FormerLiteHead,
     optimizer: torch.optim.Optimizer,
     cfg: dict[str, Any],
     step: int,
@@ -343,7 +361,7 @@ def save_checkpoint(
     torch.save(
         {
             "step": step,
-            "query_head": query_head.state_dict(),
+            "seg_head": seg_head.state_dict(),
             "optimizer": optimizer.state_dict(),
             "config": cfg,
         },
@@ -356,14 +374,16 @@ def average_loss_dicts(loss_dicts: list[dict[str, torch.Tensor]]) -> dict[str, t
         raise ValueError("No losses were produced for this training step")
     keys = (
         "loss",
-        "loss_mask_bce",
-        "loss_mask_dice",
-        "loss_objectness",
+        "loss_cls",
+        "loss_mask",
+        "loss_dice",
+        "loss_aux",
         "pred_prob_mean",
         "pred_prob_max",
-        "objectness_mean",
-        "objectness_max",
+        "object_prob_mean",
+        "object_prob_max",
         "active_queries",
+        "num_targets",
         "num_matches",
     )
     averaged = {}
@@ -388,14 +408,15 @@ def print_training_summary(
     print(f"  lingbot.checkpoint: {lingbot_ckpt}")
     print(f"  clips: {num_clips}")
     print(f"  max_steps: {cfg['train']['max_steps']}")
+    print(f"  head_type: {cfg['model'].get('head_type', 'mask2former_lite')}")
     print(f"  num_queries: {cfg['model']['num_queries']}")
     print(
         "  loss: "
-        f"mask_bce_weight={cfg['loss'].get('mask_bce_weight', cfg['loss'].get('bce_weight', 0.2))}, "
-        f"mask_dice_weight={cfg['loss'].get('mask_dice_weight', cfg['loss'].get('dice_weight', 2.0))}, "
-        f"objectness_weight={cfg['loss'].get('objectness_weight', 1.0)}, "
+        f"class_weight={cfg['loss'].get('class_weight', 2.0)}, "
+        f"mask_weight={cfg['loss'].get('mask_weight', 5.0)}, "
+        f"dice_weight={cfg['loss'].get('dice_weight', 5.0)}, "
         f"no_object_weight={cfg['loss'].get('no_object_weight', 0.1)}, "
-        f"balanced_bce={cfg['loss'].get('balanced_bce', True)}"
+        f"num_points={cfg['loss'].get('num_points', 12544)}"
     )
 
 
@@ -403,13 +424,13 @@ def save_mask_visualization(
     path: Path,
     pred_logits: torch.Tensor,
     target_masks: torch.Tensor,
-    objectness_logits: torch.Tensor,
+    class_logits: torch.Tensor,
     top_k: int = 4,
     objectness_threshold: float = 0.5,
     max_active_queries: int | None = None,
 ) -> None:
     pred_prob = pred_logits.sigmoid()
-    objectness_prob = objectness_logits.sigmoid()
+    objectness_prob = class_logits.softmax(dim=-1)[:, 1]
     active_indices = torch.nonzero(objectness_prob >= float(objectness_threshold), as_tuple=False).flatten()
     if max_active_queries is not None and active_indices.numel() > int(max_active_queries):
         top_active = torch.argsort(objectness_prob[active_indices], descending=True)[: int(max_active_queries)]
@@ -436,9 +457,9 @@ def save_mask_visualization(
         f.write(f"pred_min {float(pred_prob.min()):.6f}\n")
         f.write(f"pred_mean {float(pred_prob.mean()):.6f}\n")
         f.write(f"pred_max {float(pred_prob.max()):.6f}\n")
-        f.write(f"objectness_min {float(objectness_prob.min()):.6f}\n")
-        f.write(f"objectness_mean {float(objectness_prob.mean()):.6f}\n")
-        f.write(f"objectness_max {float(objectness_prob.max()):.6f}\n")
+        f.write(f"object_prob_min {float(objectness_prob.min()):.6f}\n")
+        f.write(f"object_prob_mean {float(objectness_prob.mean()):.6f}\n")
+        f.write(f"object_prob_max {float(objectness_prob.max()):.6f}\n")
         f.write(f"active_query_indices {[int(i) for i in active_indices]}\n")
         f.write(f"top_query_indices {[int(i) for i in top_indices]}\n")
         f.write(f"top_query_scores {[float(query_scores[int(i)]) for i in top_indices]}\n")

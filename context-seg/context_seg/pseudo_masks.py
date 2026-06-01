@@ -69,6 +69,68 @@ class PseudoMaskProvider:
         )
 
 
+class PseudoMaskFilter:
+    """Filter noisy SAM automatic masks before set-prediction training."""
+
+    def __init__(
+        self,
+        min_area_ratio: float = 0.001,
+        max_area_ratio: float = 0.6,
+        nms_iou: float = 0.8,
+        max_masks: int = 20,
+    ) -> None:
+        self.min_area_ratio = float(min_area_ratio)
+        self.max_area_ratio = float(max_area_ratio)
+        self.nms_iou = float(nms_iou)
+        self.max_masks = int(max_masks)
+
+    def __call__(
+        self,
+        masks: torch.Tensor,
+        scores: Optional[torch.Tensor] = None,
+        max_masks: Optional[int] = None,
+    ) -> torch.Tensor:
+        if masks.ndim != 3:
+            raise ValueError(f"Expected masks [M,H,W], got {tuple(masks.shape)}")
+        if masks.shape[0] == 0:
+            return masks
+        max_masks = int(max_masks if max_masks is not None else self.max_masks)
+        masks = (masks > 0.5).float()
+        areas = masks.flatten(1).sum(dim=1)
+        image_area = float(masks.shape[-2] * masks.shape[-1])
+        keep = (areas >= self.min_area_ratio * image_area) & (areas <= self.max_area_ratio * image_area)
+        indices = torch.nonzero(keep, as_tuple=False).flatten()
+        if indices.numel() == 0:
+            return masks[:0]
+
+        if scores is None:
+            order_scores = areas[indices]
+        else:
+            order_scores = scores.to(device=masks.device, dtype=masks.dtype)[indices]
+        indices = indices[torch.argsort(order_scores, descending=True)]
+
+        selected: list[torch.Tensor] = []
+        flat_masks = masks.flatten(1)
+        for idx in indices:
+            candidate = flat_masks[idx]
+            suppress = False
+            for kept_idx in selected:
+                kept = flat_masks[kept_idx]
+                intersection = (candidate * kept).sum()
+                union = candidate.sum() + kept.sum() - intersection
+                iou = intersection / union.clamp_min(1e-6)
+                if float(iou) >= self.nms_iou:
+                    suppress = True
+                    break
+            if not suppress:
+                selected.append(idx)
+            if len(selected) >= max_masks:
+                break
+        if not selected:
+            return masks[:0]
+        return masks[torch.stack(selected).long()]
+
+
 def _optional_tensor(data: np.lib.npyio.NpzFile, *keys: str) -> Optional[torch.Tensor]:
     # 中文导读：兼容不同伪标签脚本的字段命名，比如 boxes 和 bboxes。
     for key in keys:

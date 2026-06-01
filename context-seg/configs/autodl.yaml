@@ -1,9 +1,12 @@
 model:
   # 32GB 显存可以先用 32 个 object query；若显存紧张再降到 16。
-  num_queries: 64
+  head_type: mask2former_lite
+  num_queries: 100
   token_layer: -1
   hidden_dim: 256
-  mask_hidden_dim: 256
+  pixel_dim: 256
+  decoder_layers: 6
+  ffn_dim: 1024
   num_attention_heads: 8
   num_predictor_layers: 3
   # 518 与 LingBot/DINOv2 常见输入尺寸一致，patch_size=14 时得到 37x37 patch grid。
@@ -41,17 +44,24 @@ sam:
   model_type: vit_h
 
 matcher:
-  cost_bce: 0.5
-  cost_dice: 2.0
-  cost_objectness: 1.0
+  cost_class: 2.0
+  cost_mask: 5.0
+  cost_dice: 5.0
   cost_size: 128
 
 loss:
-  mask_bce_weight: 0.2
-  mask_dice_weight: 2.0
-  objectness_weight: 1.0
-  no_object_weight: 0.5
-  balanced_bce: true
+  class_weight: 2.0
+  mask_weight: 5.0
+  dice_weight: 5.0
+  no_object_weight: 0.1
+  num_points: 12544
+  oversample_ratio: 3.0
+  importance_sample_ratio: 0.75
+
+pseudo_mask:
+  min_area_ratio: 0.001
+  max_area_ratio: 0.6
+  nms_iou: 0.8
 
 train:
   # LingBot backbone 很重，第一版保持 batch_size=1；32GB 显存主要用于更长 clip/更高分辨率。
@@ -64,10 +74,10 @@ train:
   max_steps: 1000
   overfit_steps: 100
   grad_clip: 1.0
-  # 每张图最多取 16 个 SAM masks 参与匹配；num_queries=64 时会保留一部分 no-object query。
-  max_target_masks: 16
-  objectness_threshold: 0.7
-  max_active_queries: 16
+  # 每张图最多取 20 个过滤后的 SAM masks 参与匹配，避免拟合全部碎片和重叠区域。
+  max_target_masks: 20
+  objectness_threshold: 0.5
+  max_active_queries: 20
   output_dir: /root/autodl-tmp/mask-from-context-tokens/context-seg/runs/autodl_overfit
   vis_interval: 20
   save_interval: 100

@@ -5,8 +5,9 @@ from .dataset import VideoFrameDataset, collate_single_clip
 from .decoder import MaskDecoder
 from .extractor import LingbotTokenExtractor
 from .matcher import HungarianMatcher
+from .mask2former_lite import Mask2FormerLiteHead
 from .predictor import InstanceQueryPredictor, ObjectQueryPredictor
-from .pseudo_masks import PseudoMaskProvider
+from .pseudo_masks import PseudoMaskFilter, PseudoMaskProvider
 from .query_head import QueryInstanceHead
 from .streaming_extractor import StreamingLingbotTokenExtractor
 from .types import ContextTokens, MaskTargets, PseudoMasks, QuerySegOutput
@@ -18,8 +19,10 @@ __all__ = [
     "LingbotTokenExtractor",
     "MaskDecoder",
     "MaskTargets",
+    "Mask2FormerLiteHead",
     "ObjectQueryPredictor",
     "PseudoMaskProvider",
+    "PseudoMaskFilter",
     "PseudoMasks",
     "QueryInstanceHead",
     "QuerySegOutput",

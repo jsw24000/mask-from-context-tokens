@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Mapping, Optional, Tuple
 
 import torch
 
@@ -50,10 +50,13 @@ class QuerySegOutput:
     """Class-agnostic query segmentation output.
 
     mask_logits: [B, Q, H, W] or [B, S, Q, H, W].
-    objectness_logits: [B, Q] or [B, S, Q].
+    pred_logits: [B, Q, 2] or [B, S, Q, 2], class-agnostic {no-object, object}.
+    objectness_logits: [B, Q] or [B, S, Q], kept as object - no-object logit.
     query_embeddings: [B, Q, C] or [B, S, Q, C].
     """
 
     mask_logits: torch.Tensor
     objectness_logits: torch.Tensor
     query_embeddings: torch.Tensor
+    pred_logits: Optional[torch.Tensor] = None
+    aux_outputs: Tuple[Mapping[str, torch.Tensor], ...] = ()

@@ -1,8 +1,11 @@
 model:
-  num_queries: 64
+  head_type: mask2former_lite
+  num_queries: 100
   token_layer: -1
   hidden_dim: 256
-  mask_hidden_dim: 256
+  pixel_dim: 256
+  decoder_layers: 6
+  ffn_dim: 1024
   num_attention_heads: 8
   num_predictor_layers: 3
   mask_size: [518, 518]
@@ -38,17 +41,24 @@ sam:
   model_type: vit_b
 
 matcher:
-  cost_bce: 0.5
-  cost_dice: 2.0
-  cost_objectness: 1.0
+  cost_class: 2.0
+  cost_mask: 5.0
+  cost_dice: 5.0
   cost_size: 128
 
 loss:
-  mask_bce_weight: 0.2
-  mask_dice_weight: 2.0
-  objectness_weight: 1.0
+  class_weight: 2.0
+  mask_weight: 5.0
+  dice_weight: 5.0
   no_object_weight: 0.1
-  balanced_bce: true
+  num_points: 12544
+  oversample_ratio: 3.0
+  importance_sample_ratio: 0.75
+
+pseudo_mask:
+  min_area_ratio: 0.001
+  max_area_ratio: 0.6
+  nms_iou: 0.8
 
 train:
   batch_size: 1
@@ -59,9 +69,9 @@ train:
   max_steps: 100
   overfit_steps: 20
   grad_clip: 1.0
-  max_target_masks: 48
+  max_target_masks: 20
   objectness_threshold: 0.5
-  max_active_queries: 16
+  max_active_queries: 20
   output_dir: context-seg/runs/overfit
   vis_interval: 5
   save_interval: 20
