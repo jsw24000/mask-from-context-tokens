@@ -26,14 +26,27 @@ def test_video_frame_dataset_scene_images(tmp_path) -> None:
 def test_hungarian_matcher_variable_counts() -> None:
     pred = torch.randn(5, 16, 16)
     target = torch.randint(0, 2, (3, 16, 16)).float()
-    match = HungarianMatcher(cost_size=16)(pred, target)
+    objectness = torch.randn(5)
+    match = HungarianMatcher(cost_size=16)(pred, target, objectness)
     assert match.pred_indices.numel() == 3
     assert match.target_indices.numel() == 3
 
 
 def test_set_criterion_variable_masks() -> None:
     pred = torch.randn(5, 16, 16)
+    objectness = torch.randn(5)
     target = torch.randint(0, 2, (3, 16, 16)).float()
-    losses = SetCriterion(matcher=HungarianMatcher(cost_size=16))(pred, MaskTargets(masks=target))
+    losses = SetCriterion(matcher=HungarianMatcher(cost_size=16))(pred, MaskTargets(masks=target), objectness)
     assert losses["loss"].ndim == 0
+    assert losses["loss_objectness"].ndim == 0
+    assert losses["num_matches"].item() == 3
 
+
+def test_set_criterion_empty_targets_trains_no_object() -> None:
+    pred = torch.randn(5, 16, 16)
+    objectness = torch.randn(5)
+    target = torch.zeros(0, 16, 16)
+    losses = SetCriterion(matcher=HungarianMatcher(cost_size=16))(pred, MaskTargets(masks=target), objectness)
+    assert losses["loss"].ndim == 0
+    assert losses["loss_objectness"].item() > 0
+    assert losses["num_matches"].item() == 0

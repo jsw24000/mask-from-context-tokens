@@ -1,7 +1,8 @@
 model:
-  num_queries: 32
+  num_queries: 64
   token_layer: -1
   hidden_dim: 256
+  mask_hidden_dim: 256
   num_attention_heads: 8
   num_predictor_layers: 3
   mask_size: [518, 518]
@@ -39,11 +40,14 @@ sam:
 matcher:
   cost_bce: 0.5
   cost_dice: 2.0
+  cost_objectness: 1.0
   cost_size: 128
 
 loss:
-  bce_weight: 0.2
-  dice_weight: 2.0
+  mask_bce_weight: 0.2
+  mask_dice_weight: 2.0
+  objectness_weight: 1.0
+  no_object_weight: 0.1
   balanced_bce: true
 
 train:
@@ -55,7 +59,9 @@ train:
   max_steps: 100
   overfit_steps: 20
   grad_clip: 1.0
-  max_target_masks: 64
+  max_target_masks: 48
+  objectness_threshold: 0.5
+  max_active_queries: 16
   output_dir: context-seg/runs/overfit
   vis_interval: 5
   save_interval: 20

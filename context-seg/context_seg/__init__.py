@@ -7,8 +7,9 @@ from .extractor import LingbotTokenExtractor
 from .matcher import HungarianMatcher
 from .predictor import InstanceQueryPredictor, ObjectQueryPredictor
 from .pseudo_masks import PseudoMaskProvider
+from .query_head import QueryInstanceHead
 from .streaming_extractor import StreamingLingbotTokenExtractor
-from .types import ContextTokens, MaskTargets, PseudoMasks
+from .types import ContextTokens, MaskTargets, PseudoMasks, QuerySegOutput
 
 __all__ = [
     "ContextTokens",
@@ -20,6 +21,8 @@ __all__ = [
     "ObjectQueryPredictor",
     "PseudoMaskProvider",
     "PseudoMasks",
+    "QueryInstanceHead",
+    "QuerySegOutput",
     "SetCriterion",
     "StreamingLingbotTokenExtractor",
     "VideoFrameDataset",

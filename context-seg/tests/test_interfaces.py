@@ -3,7 +3,14 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from context_seg import InstanceQueryPredictor, MaskDecoder, MaskTargets, PseudoMaskProvider, SetCriterion
+from context_seg import (
+    InstanceQueryPredictor,
+    MaskDecoder,
+    MaskTargets,
+    PseudoMaskProvider,
+    QueryInstanceHead,
+    SetCriterion,
+)
 
 
 def test_predictor_decoder_shapes() -> None:
@@ -17,6 +24,25 @@ def test_predictor_decoder_shapes() -> None:
 
     assert queries.shape == (batch, 4, 16)
     assert masks.shape == (batch, 4, 32, 32)
+
+
+def test_query_instance_head_shapes() -> None:
+    batch, tokens, context_dim = 2, 16, 32
+    patch_tokens = torch.randn(batch, tokens, context_dim)
+    head = QueryInstanceHead(
+        context_dim=context_dim,
+        hidden_dim=16,
+        mask_hidden_dim=16,
+        num_queries=4,
+        num_heads=4,
+        num_layers=1,
+    )
+
+    output = head(patch_tokens, patch_grid=(4, 4), image_size=(32, 32))
+
+    assert output.query_embeddings.shape == (batch, 4, 16)
+    assert output.objectness_logits.shape == (batch, 4)
+    assert output.mask_logits.shape == (batch, 4, 32, 32)
 
 
 def test_criterion_aligned_masks() -> None:
@@ -38,4 +64,3 @@ def test_pseudo_mask_provider_npz(tmp_path) -> None:
     masks = PseudoMaskProvider(tmp_path).get("frame_000")
     assert masks.masks.shape == (2, 8, 8)
     assert masks.boxes is not None and masks.boxes.shape == (2, 4)
-

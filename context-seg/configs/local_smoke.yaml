@@ -1,8 +1,9 @@
 model:
   # 本地 smoke test 尽量轻量：只验证真实数据、LingBot、loss、可视化链路。
-  num_queries: 8
+  num_queries: 16
   token_layer: -1
   hidden_dim: 128
+  mask_hidden_dim: 128
   num_attention_heads: 4
   num_predictor_layers: 1
   mask_size: [518, 518]
@@ -40,11 +41,14 @@ sam:
 matcher:
   cost_bce: 0.5
   cost_dice: 2.0
+  cost_objectness: 1.0
   cost_size: 96
 
 loss:
-  bce_weight: 0.2
-  dice_weight: 2.0
+  mask_bce_weight: 0.2
+  mask_dice_weight: 2.0
+  objectness_weight: 1.0
+  no_object_weight: 0.1
   balanced_bce: true
 
 train:
@@ -56,7 +60,9 @@ train:
   max_steps: 2
   overfit_steps: 2
   grad_clip: 1.0
-  max_target_masks: 16
+  max_target_masks: 8
+  objectness_threshold: 0.5
+  max_active_queries: 8
   output_dir: context-seg/runs/local_smoke
   vis_interval: 1
   save_interval: 2
