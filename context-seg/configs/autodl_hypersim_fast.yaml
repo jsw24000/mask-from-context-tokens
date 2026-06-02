@@ -14,7 +14,7 @@ model:
   refinement:
     refine_dim: 8
     hidden_dim: 16
-    query_chunk_size: 10
+    query_chunk_size: 4
     residual_scale: 1.0
 
 data:

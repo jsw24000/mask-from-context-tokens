@@ -260,8 +260,23 @@ def train(args: argparse.Namespace) -> None:
                         target = sample.target_masks[cursor].to(device)
                         target = mask_filter(target, max_masks=cfg["train"].get("max_target_masks"))
                         coarse_logits = coarse_mask_logits[0, local_idx]
+                        frame_pred_logits = pred_logits[0, local_idx]
+                        matched_indices = None
                         if mask_refiner is not None:
-                            primary_logits = mask_refiner(images[cursor : cursor + 1], coarse_logits)
+                            # Refine only matched queries during training. Unmatched queries are
+                            # supervised by object/no-object classification, so keeping RGB-refine
+                            # graphs for every query wastes a large amount of high-res memory.
+                            match = matcher(coarse_logits.detach(), target, frame_pred_logits.detach())
+                            matched_indices = (match.pred_indices, match.target_indices)
+                            if match.pred_indices.numel() > 0:
+                                refined_logits = mask_refiner(
+                                    images[cursor : cursor + 1],
+                                    coarse_logits[match.pred_indices],
+                                )
+                                primary_logits = coarse_logits.clone()
+                                primary_logits[match.pred_indices] = refined_logits
+                            else:
+                                primary_logits = coarse_logits
                         else:
                             primary_logits = coarse_logits
                         aux_outputs = tuple(
@@ -274,7 +289,8 @@ def train(args: argparse.Namespace) -> None:
                         loss_dict = criterion(
                             primary_logits,
                             MaskTargets(masks=target),
-                            pred_logits[0, local_idx],
+                            frame_pred_logits,
+                            matched_indices=matched_indices,
                             aux_outputs=aux_outputs,
                         )
                         loss_dicts.append(loss_dict)
@@ -289,7 +305,7 @@ def train(args: argparse.Namespace) -> None:
                 loss = metrics["loss"]
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(
-                    seg_head.parameters(),
+                    trainable_params,
                     cfg["train"].get("grad_clip", 1.0),
                 )
                 optimizer.step()
