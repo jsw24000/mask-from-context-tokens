@@ -25,7 +25,46 @@ data:
   clip_length: 16
   num_scale_frames: 8
   clip_stride: 4
+  # Scene-level split for the small Hypersim generalization experiment.
+  # Training uses seen scenes only; evaluate.py defaults to val_limit_scenes.
   limit_scenes:
+    - ai_006_001_scene_cam_00
+    - ai_006_001_scene_cam_01
+    - ai_006_001_scene_cam_02
+    - ai_006_001_scene_cam_03
+    - ai_008_001_scene_cam_00
+    - ai_008_001_scene_cam_01
+    - ai_008_001_scene_cam_02
+    - ai_008_001_scene_cam_03
+    - ai_010_001_scene_cam_00
+    - ai_010_001_scene_cam_01
+    - ai_010_001_scene_cam_02
+    - ai_010_001_scene_cam_03
+    - ai_011_001_scene_cam_00
+    - ai_011_001_scene_cam_01
+    - ai_011_001_scene_cam_02
+    - ai_011_001_scene_cam_03
+    - ai_012_001_scene_cam_00
+    - ai_012_001_scene_cam_01
+    - ai_012_001_scene_cam_02
+    - ai_012_001_scene_cam_03
+    - ai_015_001_scene_cam_00
+    - ai_015_001_scene_cam_01
+    - ai_015_001_scene_cam_02
+    - ai_015_001_scene_cam_03
+    - ai_016_001_scene_cam_00
+    - ai_016_001_scene_cam_01
+    - ai_016_001_scene_cam_02
+    - ai_016_001_scene_cam_03
+  val_limit_scenes:
+    - ai_018_001_scene_cam_00
+    - ai_018_001_scene_cam_01
+    - ai_018_001_scene_cam_02
+    - ai_018_001_scene_cam_03
+    - ai_022_001_scene_cam_00
+    - ai_022_001_scene_cam_01
+    - ai_022_001_scene_cam_02
+    - ai_022_001_scene_cam_03
   limit_clips:
   overfit_limit_clips: 4
 
