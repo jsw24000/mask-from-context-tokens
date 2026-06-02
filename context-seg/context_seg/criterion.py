@@ -19,6 +19,9 @@ class SetCriterion(nn.Module):
         mask_weight: float = 5.0,
         dice_weight: float = 5.0,
         no_object_weight: float = 0.1,
+        boundary_weight: float = 0.0,
+        boundary_size: int = 128,
+        boundary_kernel_size: int = 3,
         num_points: int = 12544,
         oversample_ratio: float = 3.0,
         importance_sample_ratio: float = 0.75,
@@ -34,6 +37,9 @@ class SetCriterion(nn.Module):
         self.mask_weight = float(mask_weight)
         self.dice_weight = float(dice_weight)
         self.no_object_weight = float(no_object_weight)
+        self.boundary_weight = float(boundary_weight)
+        self.boundary_size = int(boundary_size)
+        self.boundary_kernel_size = int(boundary_kernel_size)
         self.num_points = int(num_points)
         self.oversample_ratio = float(oversample_ratio)
         self.importance_sample_ratio = float(importance_sample_ratio)
@@ -46,16 +52,25 @@ class SetCriterion(nn.Module):
         pred_logits: Optional[torch.Tensor] = None,
         matched_indices: Optional[torch.Tensor] = None,
         aux_outputs: tuple[Mapping[str, torch.Tensor], ...] = (),
+        include_boundary: bool = True,
     ) -> Dict[str, torch.Tensor]:
         if pred_masks.ndim == 3:
-            losses = self._loss_single(pred_masks, targets.masks, pred_logits, matched_indices)
+            losses = self._loss_single(pred_masks, targets.masks, pred_logits, matched_indices, include_boundary)
         elif pred_masks.ndim == 4:
             if targets.masks.ndim != 4 or targets.masks.shape[0] != pred_masks.shape[0]:
                 raise ValueError(
                     f"Batched SetCriterion expects targets [B,M,H,W], got pred={tuple(pred_masks.shape)} "
                     f"target={tuple(targets.masks.shape)}"
                 )
-            values = [self._loss_single(pred_masks[b], targets.masks[b], pred_logits[b] if pred_logits is not None else None) for b in range(pred_masks.shape[0])]
+            values = [
+                self._loss_single(
+                    pred_masks[b],
+                    targets.masks[b],
+                    pred_logits[b] if pred_logits is not None else None,
+                    include_boundary=include_boundary,
+                )
+                for b in range(pred_masks.shape[0])
+            ]
             losses = average_loss_dicts(values)
         else:
             raise ValueError(f"Expected pred_masks [Q,H,W] or [B,Q,H,W], got {tuple(pred_masks.shape)}")
@@ -63,7 +78,7 @@ class SetCriterion(nn.Module):
         if aux_outputs:
             aux_values = []
             for aux in aux_outputs:
-                aux_values.append(self.forward(aux["pred_masks"], targets, aux.get("pred_logits")))
+                aux_values.append(self.forward(aux["pred_masks"], targets, aux.get("pred_logits"), include_boundary=False))
             aux_losses = average_loss_dicts(aux_values)
             losses["loss_aux"] = aux_losses["loss"]
             losses["loss"] = losses["loss"] + losses["loss_aux"]
@@ -77,6 +92,7 @@ class SetCriterion(nn.Module):
         target_masks: torch.Tensor,
         pred_logits: Optional[torch.Tensor] = None,
         matched_indices: Optional[torch.Tensor] = None,
+        include_boundary: bool = True,
     ) -> Dict[str, torch.Tensor]:
         if pred_masks.ndim != 3 or target_masks.ndim != 3:
             raise ValueError(f"Expected pred [Q,H,W] and target [M,H,W], got {tuple(pred_masks.shape)} and {tuple(target_masks.shape)}")
@@ -121,21 +137,37 @@ class SetCriterion(nn.Module):
             target_points = point_sample(matched_target[:, None], point_coords)[:, 0]
             loss_mask = F.binary_cross_entropy_with_logits(pred_points, target_points)
             loss_dice = dice_loss(pred_points, target_points)
+            if include_boundary and self.boundary_weight > 0:
+                loss_boundary = boundary_dice_loss(
+                    matched_pred,
+                    matched_target,
+                    size=self.boundary_size,
+                    kernel_size=self.boundary_kernel_size,
+                )
+            else:
+                loss_boundary = zero
             pred_prob = pred_points.sigmoid()
             pred_prob_mean = pred_prob.mean()
             pred_prob_max = pred_prob.max()
         else:
             loss_mask = zero
             loss_dice = zero
+            loss_boundary = zero
             pred_prob_mean = zero
             pred_prob_max = zero
 
-        total = self.class_weight * loss_cls + self.mask_weight * loss_mask + self.dice_weight * loss_dice
+        total = (
+            self.class_weight * loss_cls
+            + self.mask_weight * loss_mask
+            + self.dice_weight * loss_dice
+            + self.boundary_weight * loss_boundary
+        )
         return {
             "loss": total,
             "loss_cls": loss_cls,
             "loss_mask": loss_mask,
             "loss_dice": loss_dice,
+            "loss_boundary": loss_boundary,
             "loss_mask_bce": loss_mask,
             "loss_mask_dice": loss_dice,
             "loss_objectness": loss_cls,
@@ -199,3 +231,33 @@ def dice_loss(pred_logits: torch.Tensor, target_masks: torch.Tensor, eps: float 
     numerator = 2 * (pred * target).sum(dim=1)
     denominator = pred.sum(dim=1) + target.sum(dim=1)
     return (1 - (numerator + eps) / (denominator + eps)).mean()
+
+
+def boundary_dice_loss(
+    pred_logits: torch.Tensor,
+    target_masks: torch.Tensor,
+    size: int = 128,
+    kernel_size: int = 3,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    if size > 0 and max(pred_logits.shape[-2:]) > size:
+        pred_logits = F.interpolate(pred_logits[:, None], size=(size, size), mode="bilinear", align_corners=False)[:, 0]
+        target_masks = F.interpolate(target_masks[:, None].float(), size=(size, size), mode="nearest")[:, 0]
+    pred_boundary = soft_boundary_map(pred_logits.sigmoid(), kernel_size=kernel_size)
+    target_boundary = soft_boundary_map(target_masks.float(), kernel_size=kernel_size)
+    numerator = 2 * (pred_boundary * target_boundary).flatten(1).sum(dim=1)
+    denominator = pred_boundary.flatten(1).sum(dim=1) + target_boundary.flatten(1).sum(dim=1)
+    return (1 - (numerator + eps) / (denominator + eps)).mean()
+
+
+def soft_boundary_map(masks: torch.Tensor, kernel_size: int = 3) -> torch.Tensor:
+    if masks.ndim != 3:
+        raise ValueError(f"Expected masks [M,H,W], got {tuple(masks.shape)}")
+    kernel_size = max(3, int(kernel_size))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    pad = kernel_size // 2
+    x = masks[:, None].float()
+    dilated = F.max_pool2d(x, kernel_size=kernel_size, stride=1, padding=pad)
+    eroded = -F.max_pool2d(-x, kernel_size=kernel_size, stride=1, padding=pad)
+    return (dilated - eroded).clamp(0, 1)[:, 0].to(dtype=masks.dtype)

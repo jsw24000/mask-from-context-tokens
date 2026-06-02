@@ -175,6 +175,9 @@ def train(args: argparse.Namespace) -> None:
         mask_weight=cfg["loss"].get("mask_weight", cfg["loss"].get("mask_bce_weight", 5.0)),
         dice_weight=cfg["loss"].get("dice_weight", cfg["loss"].get("mask_dice_weight", 5.0)),
         no_object_weight=cfg["loss"].get("no_object_weight", 0.1),
+        boundary_weight=cfg["loss"].get("boundary_weight", 0.0),
+        boundary_size=cfg["loss"].get("boundary_size", 128),
+        boundary_kernel_size=cfg["loss"].get("boundary_kernel_size", 3),
         num_points=cfg["loss"].get("num_points", 12544),
         oversample_ratio=cfg["loss"].get("oversample_ratio", 3.0),
         importance_sample_ratio=cfg["loss"].get("importance_sample_ratio", 0.75),
@@ -191,7 +194,7 @@ def train(args: argparse.Namespace) -> None:
     log_path = output_dir / "train_log.txt"
     if not log_path.exists() or log_path.stat().st_size == 0:
         with open(log_path, "w", encoding="utf-8") as f:
-            f.write("step scene loss loss_cls loss_mask loss_dice loss_aux pred_mean pred_max object_mean object_max active_queries num_targets num_matches\n")
+            f.write("step scene loss loss_cls loss_mask loss_dice loss_boundary loss_aux pred_mean pred_max object_mean object_max active_queries num_targets num_matches\n")
 
     resume_state = load_resume_state(args.resume, device) if args.resume is not None else None
     resume_loaded = False
@@ -223,12 +226,27 @@ def train(args: argparse.Namespace) -> None:
                         decoder_layers=cfg["model"].get("decoder_layers", cfg["model"].get("num_predictor_layers", 6)),
                         ffn_dim=cfg["model"].get("ffn_dim", 4 * cfg["model"]["hidden_dim"]),
                     ).to(device)
-                    trainable_params = list(seg_head.parameters())
+                    seg_params = list(seg_head.parameters())
+                    trainable_params = list(seg_params)
+                    param_groups = [
+                        {
+                            "params": seg_params,
+                            "lr": cfg["train"]["lr"],
+                            "name": "seg_head",
+                        }
+                    ]
                     if mask_refiner is not None:
-                        trainable_params.extend(mask_refiner.parameters())
+                        refiner_params = list(mask_refiner.parameters())
+                        trainable_params.extend(refiner_params)
+                        param_groups.append(
+                            {
+                                "params": refiner_params,
+                                "lr": cfg["train"].get("refiner_lr", cfg["train"]["lr"]),
+                                "name": "mask_refiner",
+                            }
+                        )
                     optimizer = torch.optim.AdamW(
-                        trainable_params,
-                        lr=cfg["train"]["lr"],
+                        param_groups,
                         weight_decay=cfg["train"]["weight_decay"],
                     )
                     if resume_state is not None and not resume_loaded:
@@ -316,6 +334,7 @@ def train(args: argparse.Namespace) -> None:
                     "loss_cls": float(metrics["loss_cls"].detach().cpu()),
                     "loss_mask": float(metrics["loss_mask"].detach().cpu()),
                     "loss_dice": float(metrics["loss_dice"].detach().cpu()),
+                    "loss_boundary": float(metrics["loss_boundary"].detach().cpu()),
                     "loss_aux": float(metrics["loss_aux"].detach().cpu()),
                     "pred_mean": float(metrics["pred_prob_mean"].detach().cpu()),
                     "pred_max": float(metrics["pred_prob_max"].detach().cpu()),
@@ -328,7 +347,8 @@ def train(args: argparse.Namespace) -> None:
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(
                         f"{step} {sample.scene} {log_values['loss']:.6f} {log_values['loss_cls']:.6f} "
-                        f"{log_values['loss_mask']:.6f} {log_values['loss_dice']:.6f} {log_values['loss_aux']:.6f} "
+                        f"{log_values['loss_mask']:.6f} {log_values['loss_dice']:.6f} "
+                        f"{log_values['loss_boundary']:.6f} {log_values['loss_aux']:.6f} "
                         f"{log_values['pred_mean']:.6f} {log_values['pred_max']:.6f} "
                         f"{log_values['object_mean']:.6f} {log_values['object_max']:.6f} "
                         f"{log_values['active_queries']:.1f} {log_values['num_targets']:.1f} {log_values['num_matches']:.1f}\n"
@@ -340,6 +360,7 @@ def train(args: argparse.Namespace) -> None:
                     cls=f"{log_values['loss_cls']:.4f}",
                     mask=f"{log_values['loss_mask']:.4f}",
                     dice=f"{log_values['loss_dice']:.4f}",
+                    bdry=f"{log_values['loss_boundary']:.4f}",
                     aux=f"{log_values['loss_aux']:.4f}",
                     omean=f"{log_values['object_mean']:.3f}",
                     omax=f"{log_values['object_max']:.3f}",
@@ -476,6 +497,7 @@ def average_loss_dicts(loss_dicts: list[dict[str, torch.Tensor]]) -> dict[str, t
         "loss_cls",
         "loss_mask",
         "loss_dice",
+        "loss_boundary",
         "loss_aux",
         "pred_prob_mean",
         "pred_prob_max",
@@ -518,9 +540,16 @@ def print_training_summary(
         f"class_weight={cfg['loss'].get('class_weight', 2.0)}, "
         f"mask_weight={cfg['loss'].get('mask_weight', 5.0)}, "
         f"dice_weight={cfg['loss'].get('dice_weight', 5.0)}, "
+        f"boundary_weight={cfg['loss'].get('boundary_weight', 0.0)}, "
         f"no_object_weight={cfg['loss'].get('no_object_weight', 0.1)}, "
         f"num_points={cfg['loss'].get('num_points', 12544)}"
     )
+    if cfg["model"].get("use_refinement", False):
+        print(
+            "  optimizer: "
+            f"seg_lr={cfg['train']['lr']}, "
+            f"refiner_lr={cfg['train'].get('refiner_lr', cfg['train']['lr'])}"
+        )
 
 
 def save_mask_visualization(

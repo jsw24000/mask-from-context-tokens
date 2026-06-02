@@ -42,6 +42,22 @@ def test_set_criterion_variable_masks() -> None:
     assert losses["num_matches"].item() == 3
 
 
+def test_set_criterion_boundary_loss() -> None:
+    pred = torch.randn(5, 16, 16)
+    pred_logits = torch.randn(5, 2)
+    target = torch.zeros(3, 16, 16)
+    target[:, 4:12, 4:12] = 1
+    losses = SetCriterion(
+        matcher=HungarianMatcher(cost_size=16),
+        num_points=64,
+        boundary_weight=1.0,
+        boundary_size=16,
+    )(pred, MaskTargets(masks=target), pred_logits)
+
+    assert losses["loss_boundary"].ndim == 0
+    assert losses["loss_boundary"].item() >= 0
+
+
 def test_set_criterion_empty_targets_trains_no_object() -> None:
     pred = torch.randn(5, 16, 16)
     pred_logits = torch.randn(5, 2)

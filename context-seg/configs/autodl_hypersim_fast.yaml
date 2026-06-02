@@ -57,6 +57,9 @@ loss:
   class_weight: 2.0
   mask_weight: 5.0
   dice_weight: 5.0
+  boundary_weight: 1.0
+  boundary_size: 128
+  boundary_kernel_size: 3
   no_object_weight: 0.2
   num_points: 4096
   oversample_ratio: 3.0
@@ -72,6 +75,7 @@ train:
   num_workers: 4
   device: cuda
   lr: 0.0001
+  refiner_lr: 0.0005
   weight_decay: 0.0001
   max_steps: 1000
   overfit_steps: 50
