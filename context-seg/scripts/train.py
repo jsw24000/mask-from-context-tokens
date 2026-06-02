@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from context_seg import (
     HungarianMatcher,
     Mask2FormerLiteHead,
+    MaskRefinementHead,
     MaskTargets,
     PseudoMaskFilter,
     SetCriterion,
@@ -64,14 +65,17 @@ def dry_run() -> None:
     criterion = SetCriterion()
 
     output = seg_head(patch_tokens, patch_grid=patch_grid, image_size=image_size)
+    refiner = MaskRefinementHead(refine_dim=4, hidden_dim=8, query_chunk_size=4)
+    refined_logits = refiner(torch.rand(1, 3, *image_size), output.mask_logits[0])
     targets = MaskTargets(masks=torch.randint(0, 2, (8, *image_size)).float())
     aux_outputs = tuple({"pred_masks": aux["pred_masks"][0], "pred_logits": aux["pred_logits"][0]} for aux in output.aux_outputs)
-    losses = criterion(output.mask_logits[0], targets, output.pred_logits[0], aux_outputs=aux_outputs)
+    losses = criterion(refined_logits, targets, output.pred_logits[0], aux_outputs=aux_outputs)
 
     print("dry-run ok")
     print(f"query_embeddings: {tuple(output.query_embeddings.shape)}")
     print(f"objectness_logits: {tuple(output.objectness_logits.shape)}")
     print(f"mask_logits: {tuple(output.mask_logits.shape)}")
+    print(f"refined_logits: {tuple(refined_logits.shape)}")
     print(f"loss: {losses['loss'].item():.4f}")
 
 
@@ -156,7 +160,9 @@ def train(args: argparse.Namespace) -> None:
         use_sdpa=cfg["lingbot"].get("use_sdpa", False),
     )
 
+    use_refinement = bool(cfg["model"].get("use_refinement", False))
     seg_head = None
+    mask_refiner = build_mask_refiner(cfg).to(device) if use_refinement else None
     optimizer = None
     matcher = HungarianMatcher(
         cost_class=cfg["matcher"].get("cost_class", cfg["matcher"].get("cost_objectness", 2.0)),
@@ -217,8 +223,11 @@ def train(args: argparse.Namespace) -> None:
                         decoder_layers=cfg["model"].get("decoder_layers", cfg["model"].get("num_predictor_layers", 6)),
                         ffn_dim=cfg["model"].get("ffn_dim", 4 * cfg["model"]["hidden_dim"]),
                     ).to(device)
+                    trainable_params = list(seg_head.parameters())
+                    if mask_refiner is not None:
+                        trainable_params.extend(mask_refiner.parameters())
                     optimizer = torch.optim.AdamW(
-                        seg_head.parameters(),
+                        trainable_params,
                         lr=cfg["train"]["lr"],
                         weight_decay=cfg["train"]["weight_decay"],
                     )
@@ -226,6 +235,7 @@ def train(args: argparse.Namespace) -> None:
                         load_training_state(
                             resume_state,
                             seg_head,
+                            mask_refiner,
                             optimizer,
                             load_optimizer=not args.no_resume_optimizer,
                         )
@@ -237,16 +247,23 @@ def train(args: argparse.Namespace) -> None:
                 loss_dicts = []
                 cursor = 0
                 last_logits = None
+                last_coarse_logits = None
                 last_pred_logits = None
                 last_target = None
+                last_rgb = None
                 for context in frame_outputs:
                     head_output = seg_head(context.patch_tokens, context.patch_grid, context.image_size)
-                    mask_logits = head_output.mask_logits
+                    coarse_mask_logits = head_output.mask_logits
                     pred_logits = head_output.pred_logits
-                    _, chunk_frames = mask_logits.shape[:2]
+                    _, chunk_frames = coarse_mask_logits.shape[:2]
                     for local_idx in range(chunk_frames):
                         target = sample.target_masks[cursor].to(device)
                         target = mask_filter(target, max_masks=cfg["train"].get("max_target_masks"))
+                        coarse_logits = coarse_mask_logits[0, local_idx]
+                        if mask_refiner is not None:
+                            primary_logits = mask_refiner(images[cursor : cursor + 1], coarse_logits)
+                        else:
+                            primary_logits = coarse_logits
                         aux_outputs = tuple(
                             {
                                 "pred_masks": aux["pred_masks"][0, local_idx],
@@ -255,15 +272,17 @@ def train(args: argparse.Namespace) -> None:
                             for aux in head_output.aux_outputs
                         )
                         loss_dict = criterion(
-                            mask_logits[0, local_idx],
+                            primary_logits,
                             MaskTargets(masks=target),
                             pred_logits[0, local_idx],
                             aux_outputs=aux_outputs,
                         )
                         loss_dicts.append(loss_dict)
-                        last_logits = mask_logits[0, local_idx].detach().cpu()
+                        last_logits = primary_logits.detach().cpu()
+                        last_coarse_logits = coarse_logits.detach().cpu()
                         last_pred_logits = pred_logits[0, local_idx].detach().cpu()
                         last_target = target.detach().cpu()
+                        last_rgb = images[cursor].detach().cpu()
                         cursor += 1
 
                 metrics = average_loss_dicts(loss_dicts)
@@ -316,6 +335,7 @@ def train(args: argparse.Namespace) -> None:
                 if (
                     step % int(cfg["train"]["vis_interval"]) == 0
                     and last_logits is not None
+                    and last_coarse_logits is not None
                     and last_target is not None
                     and last_pred_logits is not None
                 ):
@@ -324,16 +344,19 @@ def train(args: argparse.Namespace) -> None:
                         last_logits,
                         last_target,
                         last_pred_logits,
+                        rgb_image=last_rgb,
+                        coarse_logits=last_coarse_logits,
+                        refinement_enabled=mask_refiner is not None,
                         matcher=matcher,
                         objectness_threshold=cfg["train"].get("objectness_threshold", 0.5),
                         max_active_queries=cfg["train"].get("max_active_queries"),
                         min_mask_area_ratio=cfg["train"].get("min_vis_mask_area_ratio", 0.001),
                     )
                 if step % int(cfg["train"]["save_interval"]) == 0:
-                    save_checkpoint(output_dir / f"checkpoint_step_{step:06d}.pt", seg_head, optimizer, cfg, step)
+                    save_checkpoint(output_dir / f"checkpoint_step_{step:06d}.pt", seg_head, mask_refiner, optimizer, cfg, step)
 
     if seg_head is not None and optimizer is not None:
-        save_checkpoint(output_dir / "checkpoint_last.pt", seg_head, optimizer, cfg, step)
+        save_checkpoint(output_dir / "checkpoint_last.pt", seg_head, mask_refiner, optimizer, cfg, step)
 
 
 def load_config(path: str) -> dict[str, Any]:
@@ -367,22 +390,33 @@ def resolve_path(path: str | Path) -> Path:
     return PROJECT_ROOT / path
 
 
+def build_mask_refiner(cfg: dict[str, Any]) -> MaskRefinementHead:
+    refinement_cfg = cfg["model"].get("refinement", {})
+    return MaskRefinementHead(
+        refine_dim=refinement_cfg.get("refine_dim", 8),
+        hidden_dim=refinement_cfg.get("hidden_dim", 16),
+        query_chunk_size=refinement_cfg.get("query_chunk_size", 10),
+        residual_scale=refinement_cfg.get("residual_scale", 1.0),
+    )
+
+
 def save_checkpoint(
     path: Path,
     seg_head: Mask2FormerLiteHead,
+    mask_refiner: MaskRefinementHead | None,
     optimizer: torch.optim.Optimizer,
     cfg: dict[str, Any],
     step: int,
 ) -> None:
-    torch.save(
-        {
-            "step": step,
-            "seg_head": seg_head.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "config": cfg,
-        },
-        path,
-    )
+    state = {
+        "step": step,
+        "seg_head": seg_head.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "config": cfg,
+    }
+    if mask_refiner is not None:
+        state["mask_refiner"] = mask_refiner.state_dict()
+    torch.save(state, path)
 
 
 def load_resume_state(path: str | Path, device: torch.device) -> dict[str, Any]:
@@ -397,15 +431,25 @@ def load_resume_state(path: str | Path, device: torch.device) -> dict[str, Any]:
 def load_training_state(
     state: dict[str, Any],
     seg_head: Mask2FormerLiteHead,
+    mask_refiner: MaskRefinementHead | None,
     optimizer: torch.optim.Optimizer,
     load_optimizer: bool = True,
 ) -> None:
     seg_head.load_state_dict(state["seg_head"], strict=True)
+    if mask_refiner is not None:
+        if "mask_refiner" in state:
+            mask_refiner.load_state_dict(state["mask_refiner"], strict=True)
+            print("Loaded mask refiner state from checkpoint.")
+        else:
+            print("Checkpoint has no mask_refiner; using randomly initialized refiner.")
     if load_optimizer and "optimizer" in state:
-        optimizer.load_state_dict(state["optimizer"])
-        print("Loaded segmentation head and optimizer state from checkpoint.")
+        try:
+            optimizer.load_state_dict(state["optimizer"])
+            print("Loaded segmentation head/refiner and optimizer state from checkpoint.")
+        except ValueError as exc:
+            print(f"Could not load optimizer state ({exc}); optimizer starts fresh.")
     else:
-        print("Loaded segmentation head weights from checkpoint; optimizer starts fresh.")
+        print("Loaded model weights from checkpoint; optimizer starts fresh.")
 
 
 def average_loss_dicts(loss_dicts: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
@@ -452,6 +496,7 @@ def print_training_summary(
     print(f"  max_steps: {cfg['train']['max_steps']}")
     print(f"  head_type: {cfg['model'].get('head_type', 'mask2former_lite')}")
     print(f"  num_queries: {cfg['model']['num_queries']}")
+    print(f"  refinement: {bool(cfg['model'].get('use_refinement', False))}")
     print(
         "  loss: "
         f"class_weight={cfg['loss'].get('class_weight', 2.0)}, "
@@ -467,6 +512,9 @@ def save_mask_visualization(
     pred_logits: torch.Tensor,
     target_masks: torch.Tensor,
     class_logits: torch.Tensor,
+    rgb_image: torch.Tensor | None = None,
+    coarse_logits: torch.Tensor | None = None,
+    refinement_enabled: bool = False,
     matcher: HungarianMatcher | None = None,
     top_k: int = 4,
     objectness_threshold: float = 0.5,
@@ -475,6 +523,7 @@ def save_mask_visualization(
     mask_threshold: float = 0.5,
 ) -> None:
     pred_prob = pred_logits.sigmoid()
+    coarse_prob = coarse_logits.sigmoid() if coarse_logits is not None else pred_prob
     objectness_prob = class_logits.softmax(dim=-1)[:, 1]
     active_indices = torch.nonzero(objectness_prob >= float(objectness_threshold), as_tuple=False).flatten()
     raw_active_indices = active_indices.clone()
@@ -487,8 +536,10 @@ def save_mask_visualization(
         active_indices = active_indices[top_active]
     if active_indices.numel() > 0:
         pred = pred_prob[active_indices].max(dim=0).values.numpy()
+        coarse_pred = coarse_prob[active_indices].max(dim=0).values.numpy()
     else:
         pred = np.zeros(pred_prob.shape[-2:], dtype=np.float32)
+        coarse_pred = np.zeros(pred_prob.shape[-2:], dtype=np.float32)
     if target_masks.numel() > 0:
         target = target_masks.max(dim=0).values.numpy()
     else:
@@ -502,12 +553,16 @@ def save_mask_visualization(
         matched_union = np.zeros_like(pred)
         matched_order = []
 
+    rgb = _rgb_uint8(rgb_image, pred.shape)
     query_scores = objectness_prob
     top_indices = torch.argsort(query_scores, descending=True)[:top_k]
     row1 = [
-        _panel("active_union", pred),
-        _panel("target_union", target),
-        _panel("matched_union", matched_union),
+        _panel("rgb", rgb),
+        _panel("target_overlay", _overlay_masks(rgb, target=target)),
+        _panel("active_overlay", _overlay_masks(rgb, pred=pred, target=target)),
+        _panel("matched_overlay", _overlay_masks(rgb, pred=matched_union, target=target)),
+        _panel("coarse_active", coarse_pred),
+        _panel("refined_active", pred),
     ]
     for idx in top_indices:
         row1.append(_panel(f"top_obj q{int(idx)} {float(query_scores[int(idx)]):.2f}", pred_prob[int(idx)].numpy()))
@@ -518,7 +573,7 @@ def save_mask_visualization(
     while len(row2) < len(row1):
         row2.append(_panel("", np.zeros_like(pred)))
 
-    panel_h, panel_w = row1[0].shape
+    panel_h, panel_w = row1[0].shape[:2]
     row1 = _pad_panels(row1, panel_h, panel_w)
     row2 = _pad_panels(row2, panel_h, panel_w)
     canvas = np.concatenate([np.concatenate(row1, axis=1), np.concatenate(row2, axis=1)], axis=0)
@@ -528,6 +583,10 @@ def save_mask_visualization(
         f.write(f"pred_min {float(pred_prob.min()):.6f}\n")
         f.write(f"pred_mean {float(pred_prob.mean()):.6f}\n")
         f.write(f"pred_max {float(pred_prob.max()):.6f}\n")
+        f.write(f"coarse_pred_min {float(coarse_prob.min()):.6f}\n")
+        f.write(f"coarse_pred_mean {float(coarse_prob.mean()):.6f}\n")
+        f.write(f"coarse_pred_max {float(coarse_prob.max()):.6f}\n")
+        f.write(f"refinement_enabled {bool(refinement_enabled)}\n")
         f.write(f"object_prob_min {float(objectness_prob.min()):.6f}\n")
         f.write(f"object_prob_mean {float(objectness_prob.mean()):.6f}\n")
         f.write(f"object_prob_max {float(objectness_prob.max()):.6f}\n")
@@ -547,25 +606,63 @@ def _to_uint8(arr: np.ndarray) -> np.ndarray:
 
 
 def _panel(title: str, arr: np.ndarray) -> np.ndarray:
-    image = Image.fromarray(_to_uint8(arr)).convert("L")
+    if arr.ndim == 2:
+        image = Image.fromarray(_to_uint8(arr)).convert("RGB")
+    elif arr.ndim == 3 and arr.shape[-1] == 3:
+        image = Image.fromarray(arr.astype(np.uint8)).convert("RGB")
+    else:
+        raise ValueError(f"Expected panel array [H,W] or [H,W,3], got {arr.shape}")
     label_h = 18
-    canvas = Image.new("L", (image.width, image.height + label_h), color=0)
+    canvas = Image.new("RGB", (image.width, image.height + label_h), color=(0, 0, 0))
     canvas.paste(image, (0, label_h))
     if title:
         ImageDraw.Draw(canvas).text((4, 2), title, fill=255)
     return np.asarray(canvas)
 
 
+def _rgb_uint8(rgb_image: torch.Tensor | None, fallback_shape: tuple[int, int]) -> np.ndarray:
+    if rgb_image is None:
+        return np.zeros((*fallback_shape, 3), dtype=np.uint8)
+    rgb = rgb_image.detach().cpu()
+    if rgb.ndim == 4:
+        rgb = rgb[0]
+    if rgb.ndim != 3 or rgb.shape[0] != 3:
+        raise ValueError(f"Expected rgb image [3,H,W] or [1,3,H,W], got {tuple(rgb_image.shape)}")
+    arr = rgb.permute(1, 2, 0).numpy()
+    return _to_uint8(arr)
+
+
+def _overlay_masks(
+    rgb: np.ndarray,
+    pred: np.ndarray | None = None,
+    target: np.ndarray | None = None,
+    alpha: float = 0.55,
+    threshold: float = 0.5,
+) -> np.ndarray:
+    out = (rgb.astype(np.float32) * 0.65).clip(0, 255)
+    pred_mask = pred >= threshold if pred is not None else np.zeros(rgb.shape[:2], dtype=bool)
+    target_mask = target >= threshold if target is not None else np.zeros(rgb.shape[:2], dtype=bool)
+    target_only = target_mask & ~pred_mask
+    pred_only = pred_mask & ~target_mask
+    both = target_mask & pred_mask
+    out[target_only] = (1 - alpha) * out[target_only] + alpha * np.array([0, 255, 0], dtype=np.float32)
+    out[pred_only] = (1 - alpha) * out[pred_only] + alpha * np.array([255, 0, 0], dtype=np.float32)
+    out[both] = (1 - alpha) * out[both] + alpha * np.array([255, 255, 0], dtype=np.float32)
+    return out.clip(0, 255).astype(np.uint8)
+
+
 def _pad_panels(panels: list[np.ndarray], height: int, width: int) -> list[np.ndarray]:
     padded = []
     for panel in panels:
-        if panel.shape == (height, width):
+        if panel.shape[:2] == (height, width):
             padded.append(panel)
             continue
-        out = np.zeros((height, width), dtype=np.uint8)
+        out = np.zeros((height, width, panel.shape[2] if panel.ndim == 3 else 1), dtype=np.uint8)
         h = min(height, panel.shape[0])
         w = min(width, panel.shape[1])
         out[:h, :w] = panel[:h, :w]
+        if out.shape[-1] == 1:
+            out = np.repeat(out, 3, axis=-1)
         padded.append(out)
     return padded
 

@@ -7,6 +7,7 @@ from context_seg import (
     InstanceQueryPredictor,
     MaskDecoder,
     Mask2FormerLiteHead,
+    MaskRefinementHead,
     MaskTargets,
     PseudoMaskProvider,
     QueryInstanceHead,
@@ -66,6 +67,18 @@ def test_mask2former_lite_head_shapes() -> None:
     assert output.objectness_logits.shape == (batch, frames, 5)
     assert output.mask_logits.shape == (batch, frames, 5, 32, 32)
     assert len(output.aux_outputs) == 1
+
+
+def test_mask_refinement_head_shapes() -> None:
+    queries, height, width = 5, 32, 32
+    rgb = torch.rand(1, 3, height, width)
+    coarse = torch.randn(queries, height, width)
+    refiner = MaskRefinementHead(refine_dim=4, hidden_dim=8, query_chunk_size=2)
+
+    refined = refiner(rgb, coarse)
+
+    assert refined.shape == coarse.shape
+    assert torch.isfinite(refined).all()
 
 
 def test_criterion_aligned_masks() -> None:

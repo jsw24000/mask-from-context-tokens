@@ -10,6 +10,12 @@ model:
   num_predictor_layers: 3
   mask_size: [518, 518]
   patch_size: 14
+  use_refinement: true
+  refinement:
+    refine_dim: 8
+    hidden_dim: 16
+    query_chunk_size: 10
+    residual_scale: 1.0
 
 data:
   root: /root/autodl-tmp/mask-from-context-tokens/data_hypersim
