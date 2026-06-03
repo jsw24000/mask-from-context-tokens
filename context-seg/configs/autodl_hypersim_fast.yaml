@@ -56,6 +56,30 @@ data:
     - ai_016_001_scene_cam_01
     - ai_016_001_scene_cam_02
     - ai_016_001_scene_cam_03
+    - ai_024_001_scene_cam_00
+    - ai_024_001_scene_cam_01
+    - ai_024_001_scene_cam_02
+    - ai_024_001_scene_cam_03
+    - ai_026_001_scene_cam_00
+    - ai_026_001_scene_cam_01
+    - ai_026_001_scene_cam_02
+    - ai_026_001_scene_cam_03
+    - ai_030_001_scene_cam_00
+    - ai_030_001_scene_cam_01
+    - ai_030_001_scene_cam_02
+    - ai_030_001_scene_cam_03
+    - ai_031_001_scene_cam_00
+    - ai_031_001_scene_cam_01
+    - ai_031_001_scene_cam_02
+    - ai_031_001_scene_cam_03
+    - ai_032_001_scene_cam_00
+    - ai_032_001_scene_cam_01
+    - ai_032_001_scene_cam_02
+    - ai_032_001_scene_cam_03
+    - ai_033_001_scene_cam_00
+    - ai_033_001_scene_cam_01
+    - ai_033_001_scene_cam_02
+    - ai_033_001_scene_cam_03
   val_limit_scenes:
     - ai_018_001_scene_cam_00
     - ai_018_001_scene_cam_01
@@ -116,7 +140,7 @@ train:
   lr: 0.0001
   refiner_lr: 0.0005
   weight_decay: 0.0001
-  max_steps: 1000
+  max_steps: 3000
   overfit_steps: 50
   grad_clip: 1.0
   max_target_masks: 12
