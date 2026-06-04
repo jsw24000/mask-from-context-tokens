@@ -129,8 +129,10 @@ loss:
   importance_sample_ratio: 0.75
 
 pseudo_mask:
-  min_area_ratio: 0.001
-  max_area_ratio: 0.5
+  # Object-focused supervision: ignore tiny fragments and very large
+  # background-like semantic instances such as walls, floors, and broad panels.
+  min_area_ratio: 0.002
+  max_area_ratio: 0.25
   nms_iou: 0.8
 
 train:
@@ -143,7 +145,7 @@ train:
   max_steps: 3000
   overfit_steps: 50
   grad_clip: 1.0
-  max_target_masks: 12
+  max_target_masks: 8
   objectness_threshold: 0.5
   max_active_queries: 20
   min_vis_mask_area_ratio: 0.002
