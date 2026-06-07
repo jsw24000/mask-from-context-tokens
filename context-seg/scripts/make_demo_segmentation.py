@@ -67,6 +67,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=str, default=None)
     parser.add_argument("--mask-root", type=str, default=None)
     parser.add_argument("--lingbot-checkpoint", type=str, default=None)
+    parser.add_argument(
+        "--split",
+        choices=("val", "train", "all"),
+        default="val",
+        help="Scene split to sample when --scenes is not provided.",
+    )
     parser.add_argument("--scenes", nargs="*", default=None, help="Exact scene folder names. Defaults to val_limit_scenes.")
     parser.add_argument("--limit-clips", type=int, default=4)
     parser.add_argument("--num-frames", type=int, default=8, help="Maximum demo frames to save.")
@@ -92,7 +98,7 @@ def main() -> None:
     if args.save_panels:
         (output_dir / "panels").mkdir(exist_ok=True)
 
-    limit_scenes = args.scenes if args.scenes is not None else cfg["data"].get("val_limit_scenes")
+    limit_scenes = args.scenes if args.scenes is not None else scenes_for_split(cfg, args.split)
     dataset = VideoFrameDataset(
         root=resolve_path(cfg["data"]["root"]),
         mask_root=resolve_path(cfg["data"]["mask_root"]),
@@ -224,6 +230,24 @@ def apply_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> None:
         cfg["data"]["mask_root"] = args.mask_root
     if args.lingbot_checkpoint is not None:
         cfg["lingbot"]["checkpoint"] = args.lingbot_checkpoint
+
+
+def scenes_for_split(cfg: dict[str, Any], split: str) -> list[str] | None:
+    train_scenes = cfg["data"].get("limit_scenes") or []
+    val_scenes = cfg["data"].get("val_limit_scenes") or []
+    if split == "train":
+        return train_scenes
+    if split == "val":
+        return val_scenes
+    if split == "all":
+        scenes = []
+        seen = set()
+        for scene in [*train_scenes, *val_scenes]:
+            if scene not in seen:
+                scenes.append(scene)
+                seen.add(scene)
+        return scenes or None
+    raise ValueError(f"Unknown split: {split}")
 
 
 def build_extractor(cfg: dict[str, Any], device: torch.device) -> StreamingLingbotTokenExtractor:
